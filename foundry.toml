@@ -1,0 +1,16 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+auto_detect_solc = true
+remappings = [
+    "@account-abstraction/contracts/=lib/account-abstraction/contracts/",
+    "@gnosis-guild/zodiac/=lib/zodiac/",
+    "@gnosis.pm/safe-contracts/contracts/=lib/decent-contracts/contracts/mocks/safe-smart-account/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+    "@prb/math/=lib/prb-math/src/",
+    "decent-contracts/=lib/decent-contracts/",
+]
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

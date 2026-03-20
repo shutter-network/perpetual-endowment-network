@@ -1,0 +1,16 @@
+# Foundry build artifacts
+cache/
+out/
+
+# Broadcast artifacts
+broadcast/
+
+# Dependencies
+lib/**/node_modules/
+
+# Environment and local config
+.env
+.env.*
+
+# macOS
+.DS_Store
