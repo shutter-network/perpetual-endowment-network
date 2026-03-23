@@ -4,6 +4,7 @@ pragma solidity ^0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {Clones} from "openzeppelin-contracts/contracts/proxy/Clones.sol";
 import {ERC20Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC20Mock.sol";
+import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 
 import {SeatToken} from "../src/SeatToken.sol";
@@ -75,7 +76,15 @@ contract ApathyCleanupIntegrationTest is Test {
 
         asset = new ERC20Mock();
         avatar = new MockAvatar();
-        principalManager = new PrincipalManager(asset, address(avatar), address(0), address(0), 100);
+        principalManager = new PrincipalManager(
+            asset,
+            address(avatar),
+            address(0),
+            100,
+            IERC4626(address(0)),
+            IERC4626(address(0)),
+            address(0)
+        );
 
         uint256[] memory upperBounds = new uint256[](1);
         uint256[] memory prices = new uint256[](1);

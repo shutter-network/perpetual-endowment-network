@@ -1,27 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.30;
 
-import {AccessControl} from "openzeppelin-contracts/contracts/access/AccessControl.sol";
-import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
-import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
-
 import {SeatToken} from "../SeatToken.sol";
 import {PENRankedChoiceStrategy} from "./PENRankedChoiceStrategy.sol";
 
-contract FundingSlateExecutor is AccessControl {
-    using SafeERC20 for IERC20;
-
-    bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
-
-    error InvalidAdmin(address admin);
+contract FundingSlateExecutor {
     error InvalidConfig();
-    error InvalidExecutor(address executor);
     error InvalidSlate(uint16 slateId);
     error InvalidSlateConfig();
     error NotSeatHolder(address account);
     error SlateAlreadyRegistered(uint32 proposalId, uint16 slateId);
-    error UnresolvedWinner(uint32 proposalId);
 
     struct Slate {
         address[] recipients;
@@ -30,18 +18,11 @@ contract FundingSlateExecutor is AccessControl {
         bool exists;
     }
 
-    IERC20 public immutable asset;
-    IERC4626 public immutable yieldVault;
     PENRankedChoiceStrategy public immutable strategy;
     SeatToken public immutable seatToken;
 
     mapping(uint32 proposalId => mapping(uint16 slateId => Slate slate)) private _slates;
 
-    event FundingExecuted(
-        uint32 indexed proposalId,
-        uint16 indexed winningSlate,
-        uint256 distributedAmount
-    );
     event SlateRegistered(
         uint32 indexed proposalId,
         uint16 indexed slateId,
@@ -50,31 +31,15 @@ contract FundingSlateExecutor is AccessControl {
     );
 
     constructor(
-        IERC20 asset_,
-        IERC4626 yieldVault_,
         PENRankedChoiceStrategy strategy_,
-        SeatToken seatToken_,
-        address admin_,
-        address executor_
+        SeatToken seatToken_
     ) {
-        if (
-            address(asset_) == address(0) ||
-            address(yieldVault_) == address(0) ||
-            address(strategy_) == address(0) ||
-            address(seatToken_) == address(0)
-        ) {
+        if (address(strategy_) == address(0) || address(seatToken_) == address(0)) {
             revert InvalidConfig();
         }
-        if (admin_ == address(0)) revert InvalidAdmin(admin_);
-        if (executor_ == address(0)) revert InvalidExecutor(executor_);
 
-        asset = asset_;
-        yieldVault = yieldVault_;
         strategy = strategy_;
         seatToken = seatToken_;
-
-        _grantRole(DEFAULT_ADMIN_ROLE, admin_);
-        _grantRole(EXECUTOR_ROLE, executor_);
     }
 
     function registerSlate(
@@ -108,32 +73,6 @@ contract FundingSlateExecutor is AccessControl {
 
         emit SlateRegistered(proposalId_, slateId_, msg.sender, totalAmount);
     }
-
-    function executeFunding(
-        uint32 proposalId_
-    ) external onlyRole(EXECUTOR_ROLE) returns (uint16 winningSlate, uint256 distributedAmount) {
-        bool resolved;
-        (winningSlate, resolved) = strategy.getWinningSlate(proposalId_);
-        if (!resolved) revert UnresolvedWinner(proposalId_);
-
-        if (winningSlate == strategy.DEFAULT_SLATE_ID()) {
-            emit FundingExecuted(proposalId_, winningSlate, 0);
-            return (winningSlate, 0);
-        }
-
-        Slate storage slate = _slates[proposalId_][winningSlate];
-        if (!slate.exists) revert InvalidSlate(winningSlate);
-
-        distributedAmount = slate.totalAmount;
-        yieldVault.withdraw(distributedAmount, address(this), address(this));
-
-        for (uint256 i; i < slate.recipients.length; ++i) {
-            asset.safeTransfer(slate.recipients[i], slate.amounts[i]);
-        }
-
-        emit FundingExecuted(proposalId_, winningSlate, distributedAmount);
-    }
-
     function slateOf(
         uint32 proposalId_,
         uint16 slateId_
@@ -147,10 +86,6 @@ contract FundingSlateExecutor is AccessControl {
         amounts = slate.amounts;
         totalAmount = slate.totalAmount;
         exists = slate.exists;
-    }
-
-    function vaultShares() external view returns (uint256) {
-        return yieldVault.balanceOf(address(this));
     }
 
     function _isKnownSlate(uint32 proposalId_, uint16 slateId_) internal view returns (bool) {

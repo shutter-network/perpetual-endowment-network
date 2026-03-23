@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC4626Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC4626Mock.sol";
+import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
@@ -30,7 +31,7 @@ contract PrincipalUnderflowIntegrationTest is Test {
     function setUp() public {
         usdc = new MockUSDC();
         seatToken = new SeatToken("PEN Seat", "SEAT", SEAT_COUNT, 365 days, admin, address(0), address(0), address(0));
-        principalManager = new PrincipalManager(usdc, admin, address(0), address(0), 0);
+        principalManager = new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)), IERC4626(address(0)), address(0));
         principalVault = new ERC4626Mock(address(usdc));
 
         uint256[] memory upperBounds = new uint256[](1);

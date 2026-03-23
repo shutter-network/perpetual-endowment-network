@@ -20,11 +20,9 @@ contract PENRankedChoiceStrategy is StrategyV1 {
 
     error DuplicateSlate(uint16 slateId);
     error InconsistentBallotData();
-    error InvalidDefaultSlate(uint16 slateId);
+    error InvalidRanking();
     error InvalidRankedChoiceVoteType(uint8 voteType);
-    error InvalidSlate(uint16 slateId);
-    error NoSlateRanking();
-    error NotSeatHolder(address account);
+    error NotSeatHolder();
     error ProposalAlreadyConfigured(uint32 proposalId);
     error ProposalSlateConfigMissing(uint32 proposalId);
     error RankedBallotAlreadyCast(uint32 proposalId, address voter);
@@ -73,8 +71,16 @@ contract PENRankedChoiceStrategy is StrategyV1 {
         mapping(address voter => uint256 ballotIndexPlusOne) ballotIndexPlusOne;
     }
 
+    /**
+     * @notice Main storage struct for PENRankedChoiceStrategy following EIP-7201
+     * @custom:storage-location erc7201:PEN.RankedChoice.main
+     */
+    /**
+     * @dev Storage slot for RankedChoiceStorage calculated using the EIP-7201 formula:
+     * keccak256(abi.encode(uint256(keccak256("PEN.RankedChoice.main")) - 1)) & ~bytes32(uint256(0xff))
+     */
     bytes32 internal constant RANKED_CHOICE_STORAGE_LOCATION =
-        0xab7a9bdb4634c89e4d39a0e3298f636b1d90d559671762279e2582d0cabdf800;
+        0xa2f53e5365bf596d914705018ebf313f0316542f781d446f2c920caef2ac2400;
 
     function _getRankedChoiceStorage()
         internal
@@ -111,12 +117,8 @@ contract PENRankedChoiceStrategy is StrategyV1 {
             revert ProposalNotActive();
         }
 
-        if (slateId_ == DEFAULT_SLATE_ID) {
-            revert InvalidDefaultSlate(slateId_);
-        }
-
         if (_seatToken().balanceOf(msg.sender) == 0) {
-            revert NotSeatHolder(msg.sender);
+            revert NotSeatHolder();
         }
 
         if (config.slateIndexPlusOne[slateId_] != 0) {
@@ -134,11 +136,6 @@ contract PENRankedChoiceStrategy is StrategyV1 {
     ) external view returns (uint16[] memory) {
         ProposalSlateConfig storage config = _requireProposalConfig(proposalId_);
         return config.slateIds;
-    }
-
-    function defaultSlateId(uint32 proposalId_) external view returns (uint16) {
-        ProposalSlateConfig storage config = _requireProposalConfig(proposalId_);
-        return config.defaultSlateId;
     }
 
     function ballotCount(uint32 proposalId_) external view returns (uint256) {
@@ -187,11 +184,12 @@ contract PENRankedChoiceStrategy is StrategyV1 {
             }
         }
 
-        try this.decodeBallot(ballotData) returns (uint16[] memory ranking) {
-            return super.validStrategyVote(voter_, proposalId_, voteType_, votingConfigsData_) && _isValidRanking(config, ranking);
-        } catch {
+        if (!_isBallotEncodingValid(ballotData)) {
             return false;
         }
+
+        uint16[] memory ranking = _decodeBallot(ballotData);
+        return _isValidRanking(config, ranking) && super.validStrategyVote(voter_, proposalId_, voteType_, votingConfigsData_);
     }
 
     function isBasisMet(
@@ -299,12 +297,6 @@ contract PENRankedChoiceStrategy is StrategyV1 {
         return (config.defaultSlateId, false);
     }
 
-    function decodeBallot(
-        bytes calldata encodedBallot_
-    ) external pure returns (uint16[] memory) {
-        return abi.decode(encodedBallot_, (uint16[]));
-    }
-
     function _castRankedVote(
         uint32 proposalId_,
         address resolvedVoter_,
@@ -343,7 +335,7 @@ contract PENRankedChoiceStrategy is StrategyV1 {
         }
 
         uint16[] memory ranking = _decodeBallot(ballotData);
-        _validateRanking(config, ranking);
+        _validateRankingOrRevert(config, ranking);
 
         uint256 totalWeightForThisVoteTransaction = _calculateVotingWeightAndRecordVotes(
             strategyStorage,
@@ -381,6 +373,27 @@ contract PENRankedChoiceStrategy is StrategyV1 {
         bytes calldata encodedBallot_
     ) internal pure returns (uint16[] memory) {
         return abi.decode(encodedBallot_, (uint16[]));
+    }
+
+    function _isBallotEncodingValid(
+        bytes calldata encodedBallot_
+    ) internal pure returns (bool) {
+        if (encodedBallot_.length < 64 || encodedBallot_.length % 32 != 0) {
+            return false;
+        }
+
+        uint256 offset;
+        uint256 rankingLength;
+        assembly {
+            offset := calldataload(encodedBallot_.offset)
+            rankingLength := calldataload(add(encodedBallot_.offset, 0x20))
+        }
+
+        if (offset != 32) {
+            return false;
+        }
+
+        return encodedBallot_.length == 64 + (rankingLength * 32);
     }
 
     function _calculateVotingWeightAndRecordVotes(
@@ -440,28 +453,11 @@ contract PENRankedChoiceStrategy is StrategyV1 {
         ISeatActivityToken(address(_seatToken())).recordActivity(voter_);
     }
 
-    function _validateRanking(
+    function _validateRankingOrRevert(
         ProposalSlateConfig storage config,
         uint16[] memory ranking
     ) internal view {
-        if (!_isValidRanking(config, ranking)) {
-            if (ranking.length == 0) revert NoSlateRanking();
-
-            bool[] memory seen = new bool[](config.slateIds.length);
-            for (uint256 i = 0; i < ranking.length; ++i) {
-                uint16 slateId = ranking[i];
-                uint256 indexPlusOne = config.slateIndexPlusOne[slateId];
-                if (indexPlusOne == 0) {
-                    revert InvalidSlate(slateId);
-                }
-
-                uint256 index = indexPlusOne - 1;
-                if (seen[index]) {
-                    revert DuplicateSlate(slateId);
-                }
-                seen[index] = true;
-            }
-        }
+        if (!_isValidRanking(config, ranking)) revert InvalidRanking();
     }
 
     function _isValidRanking(
@@ -474,7 +470,8 @@ contract PENRankedChoiceStrategy is StrategyV1 {
 
         bool[] memory seen = new bool[](config.slateIds.length);
         for (uint256 i = 0; i < ranking.length; ++i) {
-            uint256 indexPlusOne = config.slateIndexPlusOne[ranking[i]];
+            uint16 slateId = ranking[i];
+            uint256 indexPlusOne = config.slateIndexPlusOne[slateId];
             if (indexPlusOne == 0) {
                 return false;
             }

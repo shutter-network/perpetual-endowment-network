@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC4626Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC4626Mock.sol";
+import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 
 import {PrincipalManager} from "../src/PrincipalManager.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
@@ -15,12 +16,11 @@ contract PrincipalManagerTest is Test {
 
     address internal admin = makeAddr("admin");
     address internal bonding = makeAddr("bonding");
-    address internal strategist = makeAddr("strategist");
     address internal refundReceiver = makeAddr("refundReceiver");
 
     function setUp() public {
         usdc = new MockUSDC();
-        principalManager = new PrincipalManager(usdc, admin, bonding, strategist, 10e6);
+        principalManager = new PrincipalManager(usdc, admin, bonding, 10e6, IERC4626(address(0)), IERC4626(address(0)), address(0));
         principalVault = new ERC4626Mock(address(usdc));
         yieldVault = new ERC4626Mock(address(usdc));
     }
@@ -54,7 +54,7 @@ contract PrincipalManagerTest is Test {
         vm.prank(admin);
         principalManager.setPrincipalVault(principalVault);
 
-        vm.prank(strategist);
+        vm.prank(admin);
         uint256 shares = principalManager.depositExcessToPrincipalVault();
 
         assertEq(shares, 90e6);
@@ -80,11 +80,11 @@ contract PrincipalManagerTest is Test {
         vm.prank(admin);
         principalManager.setPrincipalVault(principalVault);
 
-        vm.prank(strategist);
+        vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(PrincipalManager.InsufficientLiquidity.selector, 16e6, 15e6));
         principalManager.depositToPrincipalVault(16e6);
 
-        vm.prank(strategist);
+        vm.prank(admin);
         principalManager.depositToPrincipalVault(15e6);
 
         assertEq(principalManager.liquidAssets(), 10e6);
@@ -101,7 +101,7 @@ contract PrincipalManagerTest is Test {
         vm.prank(admin);
         principalManager.setPrincipalVault(principalVault);
 
-        vm.prank(strategist);
+        vm.prank(admin);
         principalManager.depositToPrincipalVault(15e6);
 
         vm.prank(admin);
@@ -145,7 +145,7 @@ contract PrincipalManagerTest is Test {
         principalManager.setYieldVault(yieldVault, admin);
         vm.stopPrank();
 
-        vm.prank(strategist);
+        vm.prank(admin);
         principalManager.depositExcessToPrincipalVault();
 
         usdc.mint(address(principalVault), 15e6);
@@ -173,7 +173,7 @@ contract PrincipalManagerTest is Test {
         principalManager.setYieldVault(yieldVault, admin);
         vm.stopPrank();
 
-        vm.prank(strategist);
+        vm.prank(admin);
         principalManager.depositExcessToPrincipalVault();
 
         usdc.mint(address(principalVault), 5e6);

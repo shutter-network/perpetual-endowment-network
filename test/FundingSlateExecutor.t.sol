@@ -3,9 +3,6 @@ pragma solidity ^0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {Clones} from "openzeppelin-contracts/contracts/proxy/Clones.sol";
-import {IAccessControl} from "openzeppelin-contracts/contracts/access/IAccessControl.sol";
-import {ERC20Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC20Mock.sol";
-import {ERC4626Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC4626Mock.sol";
 
 import {SeatToken} from "../src/SeatToken.sol";
 import {FundingSlateExecutor} from "../src/governance/FundingSlateExecutor.sol";
@@ -17,19 +14,14 @@ import {VoteTrackerERC20V1} from "decent-contracts/contracts/deployables/strateg
 
 contract FundingSlateExecutorTest is Test {
     uint32 internal constant PROPOSAL_ID = 7;
-    uint256 internal constant YIELD_AMOUNT = 1_000e18;
 
     address internal alice = makeAddr("alice");
     address internal bob = makeAddr("bob");
-    address internal carol = makeAddr("carol");
     address internal nonHolder = makeAddr("nonHolder");
-    address internal executor = makeAddr("executor");
     address internal recipientOne = makeAddr("recipientOne");
     address internal recipientTwo = makeAddr("recipientTwo");
 
     SeatToken internal seatToken;
-    ERC20Mock internal asset;
-    ERC4626Mock internal yieldVault;
     PENRankedChoiceStrategy internal strategy;
     VotingWeightERC20V1 internal votingWeight;
     VoteTrackerERC20V1 internal voteTracker;
@@ -49,10 +41,6 @@ contract FundingSlateExecutorTest is Test {
 
         seatToken.mint(alice, 1);
         seatToken.mint(bob, 1);
-        seatToken.mint(carol, 1);
-
-        asset = new ERC20Mock();
-        yieldVault = new ERC4626Mock(address(asset));
 
         strategy = _deployStrategy();
         seatToken.grantRole(seatToken.ACTIVITY_ROLE(), address(strategy));
@@ -62,18 +50,7 @@ contract FundingSlateExecutorTest is Test {
         strategy.initialize(3 days, 2, 500_001, _singleAddress(address(this)), address(0));
         strategy.initialize2(address(this), _singleVotingConfig());
 
-        fundingExecutor = new FundingSlateExecutor(
-            asset,
-            yieldVault,
-            strategy,
-            seatToken,
-            address(this),
-            executor
-        );
-
-        asset.mint(address(this), YIELD_AMOUNT);
-        asset.approve(address(yieldVault), YIELD_AMOUNT);
-        yieldVault.deposit(YIELD_AMOUNT, address(fundingExecutor));
+        fundingExecutor = new FundingSlateExecutor(strategy, seatToken);
     }
 
     function test_RegisterSlateRevertsForNonHolder() public {
@@ -93,70 +70,44 @@ contract FundingSlateExecutorTest is Test {
         );
     }
 
-    function test_OnlyExecutorCanExecuteFunding() public {
-        _configureWinningSlate();
-
-        vm.startPrank(nonHolder);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector,
-                nonHolder,
-                fundingExecutor.EXECUTOR_ROLE()
-            )
-        );
-        fundingExecutor.executeFunding(PROPOSAL_ID);
-        vm.stopPrank();
-    }
-
-    function test_ExecuteFundingDistributesWinningSlate() public {
-        _configureWinningSlate();
-
-        vm.prank(executor);
-        (uint16 winningSlate, uint256 distributedAmount) = fundingExecutor.executeFunding(PROPOSAL_ID);
-
-        assertEq(winningSlate, 2);
-        assertEq(distributedAmount, YIELD_AMOUNT);
-        assertEq(asset.balanceOf(recipientOne), 300e18);
-        assertEq(asset.balanceOf(recipientTwo), 700e18);
-        assertEq(yieldVault.balanceOf(address(fundingExecutor)), 0);
-    }
-
-    function _configureWinningSlate() internal {
+    function test_RegisterSlateStoresConfiguredRecipientsAndAmounts() public {
         strategy.initializeProposal(PROPOSAL_ID);
-
         vm.prank(alice);
         strategy.submitSlate(PROPOSAL_ID, 1);
+
         vm.prank(alice);
         fundingExecutor.registerSlate(
             PROPOSAL_ID,
             1,
             _recipients(recipientOne, recipientTwo),
-            _amounts(600e18, 400e18)
+            _amounts(500e18, 500e18)
         );
 
-        vm.prank(bob);
-        strategy.submitSlate(PROPOSAL_ID, 2);
-        vm.prank(bob);
-        fundingExecutor.registerSlate(
-            PROPOSAL_ID,
-            2,
-            _recipients(recipientOne, recipientTwo),
-            _amounts(300e18, 700e18)
-        );
+        (address[] memory recipients, uint256[] memory amounts, uint256 totalAmount, bool exists) =
+            fundingExecutor.slateOf(PROPOSAL_ID, 1);
 
-        vm.warp(block.timestamp + 1);
-        _castVote(alice, _ranking(1, 2, 0));
-        _castVote(bob, _ranking(2, 1, 0));
-        _castVote(carol, _ranking(2, 0, 1));
-
-        (uint16 winner, bool resolved) = strategy.getWinningSlate(PROPOSAL_ID);
-        assertTrue(resolved);
-        assertEq(winner, 2);
+        assertTrue(exists);
+        assertEq(totalAmount, 1_000e18);
+        assertEq(recipients.length, 2);
+        assertEq(recipients[0], recipientOne);
+        assertEq(recipients[1], recipientTwo);
+        assertEq(amounts[0], 500e18);
+        assertEq(amounts[1], 500e18);
     }
 
-    function _castVote(address voter_, uint16[] memory ranking_) internal {
-        vm.prank(voter_);
-        strategy.castVote(PROPOSAL_ID, 1, _voteData(ranking_), 0);
+    function test_RevertWhenSlateIsUnknownToStrategy() public {
+        strategy.initializeProposal(PROPOSAL_ID);
+
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(FundingSlateExecutor.InvalidSlate.selector, uint16(1))
+        );
+        fundingExecutor.registerSlate(
+            PROPOSAL_ID,
+            1,
+            _recipients(recipientOne, recipientTwo),
+            _amounts(500e18, 500e18)
+        );
     }
 
     function _deployStrategy() internal returns (PENRankedChoiceStrategy deployed) {
@@ -188,16 +139,6 @@ contract FundingSlateExecutorTest is Test {
         });
     }
 
-    function _voteData(
-        uint16[] memory ranking_
-    ) internal pure returns (IVotingTypes.VotingConfigVoteData[] memory votingConfigsData) {
-        votingConfigsData = new IVotingTypes.VotingConfigVoteData[](1);
-        votingConfigsData[0] = IVotingTypes.VotingConfigVoteData({
-            configIndex: 0,
-            voteData: abi.encode(ranking_)
-        });
-    }
-
     function _singleAddress(address item_) internal pure returns (address[] memory items) {
         items = new address[](1);
         items[0] = item_;
@@ -213,12 +154,5 @@ contract FundingSlateExecutorTest is Test {
         amounts = new uint256[](2);
         amounts[0] = first;
         amounts[1] = second;
-    }
-
-    function _ranking(uint16 first, uint16 second, uint16 third) internal pure returns (uint16[] memory ranking) {
-        ranking = new uint16[](3);
-        ranking[0] = first;
-        ranking[1] = second;
-        ranking[2] = third;
     }
 }

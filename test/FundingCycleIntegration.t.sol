@@ -2,6 +2,7 @@
 pragma solidity ^0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 import {Clones} from "openzeppelin-contracts/contracts/proxy/Clones.sol";
 import {ERC20Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC20Mock.sol";
 import {ERC4626Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC4626Mock.sol";
@@ -76,8 +77,15 @@ contract FundingCycleIntegrationTest is Test {
         yieldVault = new ERC4626Mock(address(asset));
         avatar = new MockAvatar();
 
-        principalManager = new PrincipalManager(asset, address(this), address(this), address(0), 0);
-        principalManager.setPrincipalVault(principalVault);
+        principalManager = new PrincipalManager(
+            asset,
+            address(this),
+            address(this),
+            0,
+            principalVault,
+            IERC4626(address(0)),
+            address(0)
+        );
 
         strategy = _deployStrategy();
         seatToken.grantRole(seatToken.ACTIVITY_ROLE(), address(strategy));
@@ -85,15 +93,12 @@ contract FundingCycleIntegrationTest is Test {
         voteTracker = _deployVoteTracker(address(strategy));
         proposerAdapter = _deployProposerAdapter();
         fundingExecutor = new FundingSlateExecutor(
-            asset,
-            yieldVault,
             strategy,
-            seatToken,
-            address(this),
-            address(avatar)
+            seatToken
         );
+        principalManager.setYieldVault(yieldVault, address(principalManager));
+        principalManager.setFundingSlateExecutor(fundingExecutor);
 
-        principalManager.setYieldVault(yieldVault, address(fundingExecutor));
         principalManager.grantRole(principalManager.DEFAULT_ADMIN_ROLE(), address(avatar));
 
         azorius = _deployAzorius();
@@ -163,13 +168,13 @@ contract FundingCycleIntegrationTest is Test {
         assertEq(principalManager.accountedPrincipal(), PRINCIPAL_AMOUNT);
         assertEq(principalManager.availableYield(), 0);
         assertEq(principalManager.deployedAssets(), PRINCIPAL_AMOUNT);
-        assertGt(yieldVault.balanceOf(address(fundingExecutor)), 0);
+        assertGt(yieldVault.balanceOf(address(principalManager)), 0);
 
         Transaction[] memory fundingTxs = new Transaction[](1);
         fundingTxs[0] = Transaction({
-            to: address(fundingExecutor),
+            to: address(principalManager),
             value: 0,
-            data: abi.encodeCall(FundingSlateExecutor.executeFunding, (FUNDING_PROPOSAL_ID)),
+            data: abi.encodeCall(PrincipalManager.executeFunding, (FUNDING_PROPOSAL_ID)),
             operation: Enum.Operation.Call
         });
 
@@ -221,7 +226,7 @@ contract FundingCycleIntegrationTest is Test {
 
         assertEq(asset.balanceOf(grantOne), slateTwoGrant);
         assertEq(asset.balanceOf(grantTwo), slateTwoReserve);
-        assertEq(yieldVault.balanceOf(address(fundingExecutor)), 0);
+        assertEq(yieldVault.balanceOf(address(principalManager)), 0);
         assertEq(principalManager.accountedPrincipal(), PRINCIPAL_AMOUNT);
         assertEq(principalManager.deployedAssets(), PRINCIPAL_AMOUNT);
         assertEq(principalManager.availableYield(), 0);

@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC4626Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC4626Mock.sol";
+import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
@@ -118,7 +119,8 @@ contract BankRunIntegrationTest is Test {
         MockUSDC usdc = new MockUSDC();
         SeatToken seatToken =
             new SeatToken("PEN Seat", "SEAT", 3, 365 days, admin, address(0), address(0), address(0));
-        PrincipalManager principalManager = new PrincipalManager(usdc, admin, address(0), address(0), 0);
+        PrincipalManager principalManager =
+            new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)), IERC4626(address(0)), address(0));
 
         uint256[] memory upperBounds = new uint256[](1);
         uint256[] memory prices = new uint256[](1);
@@ -173,7 +175,9 @@ contract BankRunIntegrationTest is Test {
     {
         usdc = new MockUSDC();
         seatToken = new SeatToken("PEN Seat", "SEAT", TOTAL_PURCHASES, 365 days, admin, address(0), address(0), address(0));
-        principalManager = new PrincipalManager(usdc, admin, address(0), address(0), RESERVE_TARGET);
+        principalManager = new PrincipalManager(
+            usdc, admin, address(0), RESERVE_TARGET, IERC4626(address(0)), IERC4626(address(0)), address(0)
+        );
         principalVault = new ERC4626Mock(address(usdc));
 
         uint256[] memory upperBounds = new uint256[](1);
@@ -213,7 +217,9 @@ contract BankRunIntegrationTest is Test {
     {
         usdc = new MockUSDC();
         seatToken = new SeatToken("PEN Seat", "SEAT", TOTAL_PURCHASES, 365 days, admin, address(0), address(0), address(0));
-        principalManager = new PrincipalManager(usdc, admin, address(0), address(0), RESERVE_TARGET);
+        principalManager = new PrincipalManager(
+            usdc, admin, address(0), RESERVE_TARGET, IERC4626(address(0)), IERC4626(address(0)), address(0)
+        );
         principalVault = new LimitedWithdrawalVault(address(usdc));
 
         uint256[] memory upperBounds = new uint256[](1);

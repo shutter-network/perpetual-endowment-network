@@ -63,7 +63,15 @@ contract DecentGovernanceIntegrationTest is Test {
 
         avatar = new MockAvatar();
         asset = new ERC20Mock();
-        principalManager = new PrincipalManager(asset, address(avatar), address(0), address(0), 100);
+        principalManager = new PrincipalManager(
+            asset,
+            address(avatar),
+            address(0),
+            100,
+            ERC4626Mock(address(0)),
+            ERC4626Mock(address(0)),
+            address(0)
+        );
 
         strategy = _deployStrategy();
         seatToken.grantRole(seatToken.ACTIVITY_ROLE(), address(strategy));

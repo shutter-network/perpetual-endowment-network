@@ -2,12 +2,14 @@
 pragma solidity ^0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 import {Clones} from "openzeppelin-contracts/contracts/proxy/Clones.sol";
 import {ERC20Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC20Mock.sol";
 import {ERC4626Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC4626Mock.sol";
 import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 
 import {SeatToken} from "../src/SeatToken.sol";
+import {PrincipalManager} from "../src/PrincipalManager.sol";
 import {FundingSlateExecutor} from "../src/governance/FundingSlateExecutor.sol";
 import {PENRankedChoiceStrategy} from "../src/governance/PENRankedChoiceStrategy.sol";
 
@@ -38,6 +40,7 @@ contract InstantRunoffIntegrationTest is Test {
     SeatToken internal seatToken;
     ERC20Mock internal asset;
     ERC4626Mock internal yieldVault;
+    PrincipalManager internal principalManager;
     FundingSlateExecutor internal fundingExecutor;
     PENRankedChoiceStrategy internal strategy;
     ModuleAzoriusV1 internal azorius;
@@ -67,6 +70,15 @@ contract InstantRunoffIntegrationTest is Test {
         asset = new ERC20Mock();
         yieldVault = new ERC4626Mock(address(asset));
         avatar = new MockAvatar();
+        principalManager = new PrincipalManager(
+            asset,
+            address(this),
+            address(0),
+            0,
+            IERC4626(address(0)),
+            IERC4626(address(0)),
+            address(0)
+        );
 
         strategy = _deployStrategy();
         seatToken.grantRole(seatToken.ACTIVITY_ROLE(), address(strategy));
@@ -74,14 +86,10 @@ contract InstantRunoffIntegrationTest is Test {
         voteTracker = _deployVoteTracker(address(strategy));
         proposerAdapter = _deployProposerAdapter();
 
-        fundingExecutor = new FundingSlateExecutor(
-            asset,
-            yieldVault,
-            strategy,
-            seatToken,
-            address(this),
-            address(avatar)
-        );
+        fundingExecutor = new FundingSlateExecutor(strategy, seatToken);
+        principalManager.setYieldVault(yieldVault, address(principalManager));
+        principalManager.setFundingSlateExecutor(fundingExecutor);
+        principalManager.grantRole(principalManager.DEFAULT_ADMIN_ROLE(), address(avatar));
 
         azorius = _deployAzorius();
         avatar.enableModule(address(azorius));
@@ -97,15 +105,15 @@ contract InstantRunoffIntegrationTest is Test {
 
         asset.mint(address(this), DISTRIBUTION_AMOUNT);
         asset.approve(address(yieldVault), DISTRIBUTION_AMOUNT);
-        yieldVault.deposit(DISTRIBUTION_AMOUNT, address(fundingExecutor));
+        yieldVault.deposit(DISTRIBUTION_AMOUNT, address(principalManager));
     }
 
     function test_InstantRunoffEliminatesLowestSlateAndAzoriusExecutesWinner() public {
         Transaction[] memory fundingTxs = new Transaction[](1);
         fundingTxs[0] = Transaction({
-            to: address(fundingExecutor),
+            to: address(principalManager),
             value: 0,
-            data: abi.encodeCall(FundingSlateExecutor.executeFunding, (PROPOSAL_ID)),
+            data: abi.encodeCall(PrincipalManager.executeFunding, (PROPOSAL_ID)),
             operation: Enum.Operation.Call
         });
 
@@ -170,7 +178,7 @@ contract InstantRunoffIntegrationTest is Test {
         assertEq(asset.balanceOf(slateARecipient), 0);
         assertEq(asset.balanceOf(slateBRecipient), DISTRIBUTION_AMOUNT);
         assertEq(asset.balanceOf(slateCRecipient), 0);
-        assertEq(yieldVault.balanceOf(address(fundingExecutor)), 0);
+        assertEq(yieldVault.balanceOf(address(principalManager)), 0);
         assertEq(uint8(azorius.proposalState(PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.EXECUTED));
     }
 

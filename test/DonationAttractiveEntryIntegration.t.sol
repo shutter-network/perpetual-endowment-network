@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
@@ -26,7 +27,7 @@ contract DonationAttractiveEntryIntegrationTest is Test {
     function setUp() public {
         usdc = new MockUSDC();
         seatToken = new SeatToken("PEN Seat", "SEAT", SUPPLY_CAP, 365 days, admin, address(0), address(0), address(0));
-        principalManager = new PrincipalManager(usdc, admin, address(0), address(0), 0);
+        principalManager = new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)), IERC4626(address(0)), address(0));
 
         uint256[] memory upperBounds = new uint256[](1);
         uint256[] memory prices = new uint256[](1);

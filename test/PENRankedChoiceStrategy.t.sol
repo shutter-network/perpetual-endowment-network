@@ -13,10 +13,22 @@ import {IVotingTypes} from "decent-contracts/contracts/interfaces/decent/deploya
 import {VotingWeightERC20V1} from "decent-contracts/contracts/deployables/strategies/voting-weight/VotingWeightERC20V1.sol";
 import {VoteTrackerERC20V1} from "decent-contracts/contracts/deployables/strategies/vote-trackers/VoteTrackerERC20V1.sol";
 
+contract WinningSlateGasProbe {
+    function measure(
+        PENRankedChoiceStrategy strategy_,
+        uint32 proposalId_
+    ) external view returns (uint256 gasUsed, uint16 winner, bool resolved) {
+        uint256 gasBefore = gasleft();
+        (winner, resolved) = strategy_.getWinningSlate(proposalId_);
+        gasUsed = gasBefore - gasleft();
+    }
+}
+
 contract PENRankedChoiceStrategyTest is Test {
     uint32 internal constant VOTING_PERIOD = 3 days;
     uint32 internal constant PROPOSAL_ID = 1;
     address internal constant PROPOSER_ADAPTER = address(0xBEEF);
+    uint256 internal constant REPRESENTATIVE_BLOCK_GAS_LIMIT = 30_000_000;
 
     address internal alice = address(0xA11CE);
     address internal bob = address(0xB0B);
@@ -28,6 +40,8 @@ contract PENRankedChoiceStrategyTest is Test {
     PENRankedChoiceStrategy internal strategy;
     VotingWeightERC20V1 internal votingWeight;
     VoteTrackerERC20V1 internal voteTracker;
+    WinningSlateGasProbe internal gasProbe;
+    uint32 internal nextStressProposalId = 10_000;
 
     function setUp() public {
         seatToken = new SeatToken(
@@ -58,6 +72,7 @@ contract PENRankedChoiceStrategyTest is Test {
             address(this),
             _singleVotingConfig(address(votingWeight), address(voteTracker))
         );
+        gasProbe = new WinningSlateGasProbe();
     }
 
     function test_InitializeStoresVotingSetup() public view {
@@ -100,7 +115,6 @@ contract PENRankedChoiceStrategyTest is Test {
         uint16[] memory slateIds = strategy.proposalSlateIds(PROPOSAL_ID);
         assertEq(slateIds.length, 1);
         assertEq(slateIds[0], 0);
-        assertEq(strategy.defaultSlateId(PROPOSAL_ID), 0);
         assertEq(strategy.ballotCount(PROPOSAL_ID), 0);
     }
 
@@ -169,7 +183,7 @@ contract PENRankedChoiceStrategyTest is Test {
         vm.prank(alice);
         vm.expectRevert(
             abi.encodeWithSelector(
-                PENRankedChoiceStrategy.InvalidDefaultSlate.selector,
+                PENRankedChoiceStrategy.DuplicateSlate.selector,
                 uint16(0)
             )
         );
@@ -372,7 +386,7 @@ contract PENRankedChoiceStrategyTest is Test {
         assertFalse(strategy.validStrategyVote(alice, PROPOSAL_ID, 1, emptyRankingVote));
 
         vm.prank(alice);
-        vm.expectRevert(PENRankedChoiceStrategy.NoSlateRanking.selector);
+        vm.expectRevert(PENRankedChoiceStrategy.InvalidRanking.selector);
         strategy.castVote(PROPOSAL_ID, 1, emptyRankingVote, 0);
     }
 
@@ -382,9 +396,7 @@ contract PENRankedChoiceStrategyTest is Test {
         IVotingTypes.VotingConfigVoteData[] memory voteData = _voteData(_ranking(1, 77));
 
         vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(PENRankedChoiceStrategy.InvalidSlate.selector, uint16(77))
-        );
+        vm.expectRevert(PENRankedChoiceStrategy.InvalidRanking.selector);
         strategy.castVote(PROPOSAL_ID, 1, voteData, 0);
     }
 
@@ -394,9 +406,7 @@ contract PENRankedChoiceStrategyTest is Test {
         IVotingTypes.VotingConfigVoteData[] memory voteData = _voteData(_ranking(1, 2, 1));
 
         vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(PENRankedChoiceStrategy.DuplicateSlate.selector, uint16(1))
-        );
+        vm.expectRevert(PENRankedChoiceStrategy.InvalidRanking.selector);
         strategy.castVote(PROPOSAL_ID, 1, voteData, 0);
     }
 
@@ -487,6 +497,41 @@ contract PENRankedChoiceStrategyTest is Test {
         assertEq(winner, 0);
     }
 
+    function test_GetWinningSlateGasCrossesRepresentativeBlockLimit() public {
+        uint16 lowerBound = 0;
+        uint16 upperBound = 8;
+        uint256 gasUsedAtUpperBound;
+
+        while (true) {
+            gasUsedAtUpperBound = _measureWinningSlateGasForStressProposal(upperBound);
+            if (gasUsedAtUpperBound > REPRESENTATIVE_BLOCK_GAS_LIMIT) {
+                break;
+            }
+
+            lowerBound = upperBound;
+            upperBound *= 2;
+            assertLe(upperBound, 512, "stress search did not cross representative block gas limit");
+        }
+
+        while (upperBound - lowerBound > 1) {
+            uint16 midpoint = lowerBound + (upperBound - lowerBound) / 2;
+            uint256 gasUsedAtMidpoint = _measureWinningSlateGasForStressProposal(midpoint);
+
+            if (gasUsedAtMidpoint > REPRESENTATIVE_BLOCK_GAS_LIMIT) {
+                upperBound = midpoint;
+                gasUsedAtUpperBound = gasUsedAtMidpoint;
+            } else {
+                lowerBound = midpoint;
+            }
+        }
+
+        emit log_named_uint("winning slate gas threshold slates", upperBound);
+        emit log_named_uint("winning slate gas at threshold", gasUsedAtUpperBound);
+        emit log_named_uint("representative block gas limit", REPRESENTATIVE_BLOCK_GAS_LIMIT);
+
+        assertGt(gasUsedAtUpperBound, REPRESENTATIVE_BLOCK_GAS_LIMIT);
+    }
+
     function test_IsBasisMetAndIsPassedFollowResolvedWinnerAndQuorum() public {
         _initializeProposalWithTwoSlates();
 
@@ -529,19 +574,6 @@ contract PENRankedChoiceStrategyTest is Test {
         assertTrue(strategy.isPassed(PROPOSAL_ID));
     }
 
-    function test_DecodeBallotReturnsExpectedRanking() public view {
-        uint16[] memory ranking = strategy.decodeBallot(abi.encode(_ranking(1, 2, 0)));
-        assertEq(ranking.length, 3);
-        assertEq(ranking[0], 1);
-        assertEq(ranking[1], 2);
-        assertEq(ranking[2], 0);
-    }
-
-    function test_RevertWhenDecodeBallotInputIsMalformed() public {
-        vm.expectRevert();
-        strategy.decodeBallot(abi.encode(uint16(1)));
-    }
-
     function _initializeProposalWithTwoSlates() internal {
         _initializeProposalWithTwoSlates(strategy, PROPOSAL_ID);
     }
@@ -571,6 +603,52 @@ contract PENRankedChoiceStrategyTest is Test {
         strategy.submitSlate(PROPOSAL_ID, 3);
 
         vm.warp(block.timestamp + 1);
+    }
+
+    function _measureWinningSlateGasForStressProposal(
+        uint16 slateCount_
+    ) internal returns (uint256 gasUsed) {
+        uint32 proposalId = nextStressProposalId++;
+        _initializeStressProposal(proposalId, slateCount_);
+
+        bool resolved;
+        (gasUsed, , resolved) = gasProbe.measure(strategy, proposalId);
+        assertTrue(resolved);
+    }
+
+    function _initializeStressProposal(uint32 proposalId_, uint16 slateCount_) internal {
+        vm.warp(block.timestamp + 1);
+
+        address[] memory voters = new address[](slateCount_);
+        for (uint16 i = 0; i < slateCount_; ++i) {
+            address voter = _stressVoter(proposalId_, i);
+            voters[i] = voter;
+            _mintSeats(voter, uint256(i) + 1);
+        }
+
+        vm.warp(block.timestamp + 1);
+        strategy.initializeProposal(proposalId_);
+
+        for (uint16 i = 0; i < slateCount_; ++i) {
+            vm.prank(voters[i]);
+            strategy.submitSlate(proposalId_, i + 1);
+        }
+
+        vm.warp(block.timestamp + 1);
+
+        for (uint16 i = 0; i < slateCount_; ++i) {
+            vm.prank(voters[i]);
+            strategy.castVote(
+                proposalId_,
+                1,
+                _voteData(_stressRanking(slateCount_, i + 1)),
+                0
+            );
+        }
+    }
+
+    function _stressVoter(uint32 proposalId_, uint16 voterIndex_) internal pure returns (address) {
+        return address(uint160((uint256(proposalId_) << 16) | uint256(voterIndex_) + 1));
     }
 
     function _mintSeats(address account, uint256 amount) internal {
@@ -646,6 +724,30 @@ contract PENRankedChoiceStrategyTest is Test {
     function _singleAdapter(address adapter_) internal pure returns (address[] memory adapters) {
         adapters = new address[](1);
         adapters[0] = adapter_;
+    }
+
+    function _stressRanking(
+        uint16 slateCount_,
+        uint16 firstSlateId_
+    ) internal pure returns (uint16[] memory ranking) {
+        ranking = new uint16[](uint256(slateCount_) + 1);
+
+        uint256 cursor;
+        for (uint16 slateId = firstSlateId_; slateId <= slateCount_; ++slateId) {
+            ranking[cursor] = slateId;
+            unchecked {
+                ++cursor;
+            }
+        }
+
+        for (uint16 slateId = 1; slateId < firstSlateId_; ++slateId) {
+            ranking[cursor] = slateId;
+            unchecked {
+                ++cursor;
+            }
+        }
+
+        ranking[cursor] = 0;
     }
 
     function _ranking(uint16 first, uint16 second) internal pure returns (uint16[] memory ranking) {
