@@ -55,10 +55,12 @@ contract SeatTokenTest is Test {
 
         vm.prank(alice);
         vm.expectRevert(SeatToken.TransfersDisabled.selector);
+        /// forge-lint: disable-next-line(erc20-unchecked-transfer)
         seatToken.transfer(bob, 1);
 
         vm.prank(alice);
         vm.expectRevert(SeatToken.TransfersDisabled.selector);
+        /// forge-lint: disable-next-line(erc20-unchecked-transfer)
         seatToken.transferFrom(alice, bob, 1);
 
         vm.prank(alice);

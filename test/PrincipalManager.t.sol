@@ -12,7 +12,6 @@ contract PrincipalManagerTest is Test {
     MockUSDC internal usdc;
     PrincipalManager internal principalManager;
     ERC4626Mock internal principalVault;
-    ERC4626Mock internal yieldVault;
 
     address internal admin = makeAddr("admin");
     address internal bonding = makeAddr("bonding");
@@ -20,9 +19,8 @@ contract PrincipalManagerTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC();
-        principalManager = new PrincipalManager(usdc, admin, bonding, 10e6, IERC4626(address(0)), IERC4626(address(0)), address(0));
+        principalManager = new PrincipalManager(usdc, admin, bonding, 10e6, IERC4626(address(0)));
         principalVault = new ERC4626Mock(address(usdc));
-        yieldVault = new ERC4626Mock(address(usdc));
     }
 
     function test_DirectFundingIncreasesManagedAssets() public {
@@ -91,7 +89,7 @@ contract PrincipalManagerTest is Test {
         assertEq(principalManager.deployedAssets(), 15e6);
     }
 
-    function test_CannotSwitchVaultWithOpenPosition() public {
+    function test_CanSwitchVaultWithOpenPosition() public {
         ERC4626Mock secondPrincipalVault = new ERC4626Mock(address(usdc));
         usdc.mint(address(principalManager), 25e6);
 
@@ -105,10 +103,9 @@ contract PrincipalManagerTest is Test {
         principalManager.depositToPrincipalVault(15e6);
 
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(PrincipalManager.ActiveVaultPositionExists.selector, address(principalVault), 15e6)
-        );
         principalManager.setPrincipalVault(secondPrincipalVault);
+
+        assertEq(address(principalManager.principalVault()), address(secondPrincipalVault));
     }
 
     function test_SetPrincipalVaultRejectsWrongAsset() public {
@@ -134,52 +131,50 @@ contract PrincipalManagerTest is Test {
         assertEq(principalManager.availableYield(), 0);
     }
 
-    function test_CanTransferOnlyYieldToYieldVault() public {
-        usdc.mint(address(principalManager), 100e6);
+    function test_DeployedAssetsIncludesCurrentAndPreviousVaults() public {
+        ERC4626Mock secondPrincipalVault = new ERC4626Mock(address(usdc));
+        usdc.mint(address(principalManager), 40e6);
 
         vm.prank(bonding);
-        principalManager.recordPurchase(100e6);
+        principalManager.recordPurchase(40e6);
 
-        vm.startPrank(admin);
+        vm.prank(admin);
         principalManager.setPrincipalVault(principalVault);
-        principalManager.setYieldVault(yieldVault, admin);
-        vm.stopPrank();
 
         vm.prank(admin);
-        principalManager.depositExcessToPrincipalVault();
-
-        usdc.mint(address(principalVault), 15e6);
-
-        assertEq(principalManager.availableYield(), 14_999_999);
+        principalManager.depositToPrincipalVault(30e6);
 
         vm.prank(admin);
-        principalManager.transferYieldToVault(12e6);
+        principalManager.setPrincipalVault(secondPrincipalVault);
 
-        assertEq(usdc.balanceOf(address(yieldVault)), 12e6);
-        assertEq(yieldVault.balanceOf(admin), 12e6);
-        assertEq(principalManager.accountedPrincipal(), 100e6);
-        assertEq(principalManager.availableYield(), 2_999_999);
-        assertEq(principalManager.totalManagedAssets(), 102_999_999);
+        assertEq(principalManager.previousPrincipalVaultCount(), 1);
+        assertEq(address(principalManager.previousPrincipalVaults(0)), address(principalVault));
+        assertEq(principalManager.deployedAssets(), 30e6);
+
+        usdc.mint(address(principalManager), 5e6);
+        vm.prank(admin);
+        principalManager.depositToPrincipalVault(5e6);
+
+        assertEq(principalManager.deployedAssets(), 35e6);
     }
 
-    function test_CannotTransferMoreThanAvailableYield() public {
-        usdc.mint(address(principalManager), 50e6);
+    function test_PreviousPrincipalVaultsAreDeduplicated() public {
+        ERC4626Mock secondPrincipalVault = new ERC4626Mock(address(usdc));
 
-        vm.prank(bonding);
-        principalManager.recordPurchase(50e6);
-
-        vm.startPrank(admin);
+        vm.prank(admin);
         principalManager.setPrincipalVault(principalVault);
-        principalManager.setYieldVault(yieldVault, admin);
-        vm.stopPrank();
 
         vm.prank(admin);
-        principalManager.depositExcessToPrincipalVault();
-
-        usdc.mint(address(principalVault), 5e6);
+        principalManager.setPrincipalVault(secondPrincipalVault);
 
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(PrincipalManager.InsufficientAvailableYield.selector, 6e6, 4_999_999));
-        principalManager.transferYieldToVault(6e6);
+        principalManager.setPrincipalVault(principalVault);
+
+        vm.prank(admin);
+        principalManager.setPrincipalVault(secondPrincipalVault);
+
+        assertEq(principalManager.previousPrincipalVaultCount(), 2);
+        assertEq(address(principalManager.previousPrincipalVaults(0)), address(principalVault));
+        assertEq(address(principalManager.previousPrincipalVaults(1)), address(secondPrincipalVault));
     }
 }

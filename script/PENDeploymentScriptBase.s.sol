@@ -12,8 +12,7 @@ import {console2} from "forge-std/console2.sol";
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
 import {SeatToken} from "../src/SeatToken.sol";
-import {FundingSlateExecutor} from "../src/governance/FundingSlateExecutor.sol";
-import {PENRankedChoiceStrategy} from "../src/governance/PENRankedChoiceStrategy.sol";
+import {PENStrategyV1} from "../src/governance/PENStrategyV1.sol";
 import {PENSafeBootstrap} from "../src/deployment/PENSafeBootstrap.sol";
 
 import {IVotingTypes} from "decent-contracts/contracts/interfaces/decent/deployables/IVotingTypes.sol";
@@ -37,7 +36,6 @@ abstract contract PENDeploymentHelper {
         uint256 liquidReserveTarget;
         address paymentAsset;
         address principalVault;
-        address yieldVault;
         uint256[] trancheUpperBounds;
         uint256[] tranchePrices;
     }
@@ -66,7 +64,6 @@ abstract contract PENDeploymentHelper {
         address seatToken;
         address principalManager;
         address bondingTranche;
-        address fundingSlateExecutor;
         address strategy;
         address azorius;
         address votingWeight;
@@ -97,10 +94,6 @@ abstract contract PENDeploymentHelper {
         predicted_.principalManager = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.bondingTranche = _computeCreateAddress(deployer_, nextNonce++);
 
-        if (config_.core.yieldVault != address(0)) {
-            predicted_.fundingSlateExecutor = _computeCreateAddress(deployer_, nextNonce++);
-        }
-
         predicted_.safe = _predictSafeAddress(predicted_, salt_);
     }
 
@@ -130,8 +123,7 @@ abstract contract PENDeploymentHelper {
         (
             deployed_.seatToken,
             deployed_.principalManager,
-            deployed_.bondingTranche,
-            deployed_.fundingSlateExecutor
+            deployed_.bondingTranche
         ) = _deployCoreContracts(expected_, config_, bootstrapAuthority_);
 
         deployed_.safe = address(
@@ -159,7 +151,7 @@ abstract contract PENDeploymentHelper {
             address azorius_
         )
     {
-        address strategyImplementation = address(new PENRankedChoiceStrategy());
+        address strategyImplementation = address(new PENStrategyV1());
         address votingWeightImplementation = address(new VotingWeightERC20V1());
         address voteTrackerImplementation = address(new VoteTrackerERC20V1());
         address proposerAdapterImplementation = address(new ProposerAdapterERC20V1());
@@ -190,8 +182,7 @@ abstract contract PENDeploymentHelper {
         returns (
             address seatToken_,
             address principalManager_,
-            address bondingTranche_,
-            address fundingSlateExecutor_
+            address bondingTranche_
         )
     {
         seatToken_ = address(
@@ -214,9 +205,7 @@ abstract contract PENDeploymentHelper {
                 bootstrapAuthority_,
                 address(0),
                 config_.core.liquidReserveTarget,
-                IERC4626(config_.core.principalVault),
-                IERC4626(config_.core.yieldVault),
-                expected_.principalManager
+                IERC4626(config_.core.principalVault)
             )
         );
         _assertDeployedAddress("PRINCIPAL_MANAGER", expected_.principalManager, principalManager_);
@@ -233,15 +222,6 @@ abstract contract PENDeploymentHelper {
             )
         );
         _assertDeployedAddress("BONDING_TRANCHE", expected_.bondingTranche, bondingTranche_);
-
-        if (config_.core.yieldVault != address(0)) {
-            fundingSlateExecutor_ = address(
-                new FundingSlateExecutor(PENRankedChoiceStrategy(expected_.strategy), SeatToken(expected_.seatToken))
-            );
-            _assertDeployedAddress("FUNDING_EXECUTOR", expected_.fundingSlateExecutor, fundingSlateExecutor_);
-
-            PrincipalManager(principalManager_).setFundingSlateExecutor(FundingSlateExecutor(fundingSlateExecutor_));
-        }
     }
 
     function _initializeGovernance(
@@ -254,7 +234,7 @@ abstract contract PENDeploymentHelper {
 
         address[] memory proposerAdapters = new address[](1);
         proposerAdapters[0] = deployed_.proposerAdapter;
-        PENRankedChoiceStrategy(deployed_.strategy).initialize(
+        PENStrategyV1(deployed_.strategy).initialize(
             config_.governance.votingPeriod,
             config_.governance.quorumThreshold,
             config_.governance.basisNumerator,
@@ -282,7 +262,7 @@ abstract contract PENDeploymentHelper {
         IVotingTypes.VotingConfig[] memory votingConfigs = new IVotingTypes.VotingConfig[](1);
         votingConfigs[0] =
             IVotingTypes.VotingConfig({votingWeight: deployed_.votingWeight, voteTracker: deployed_.voteTracker});
-        PENRankedChoiceStrategy(deployed_.strategy).initialize2(deployed_.azorius, votingConfigs);
+        PENStrategyV1(deployed_.strategy).initialize2(deployed_.azorius, votingConfigs);
     }
 
     function _finalizeAccess(
@@ -355,7 +335,6 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
             liquidReserveTarget: vm.envUint("LIQUID_RESERVE_TARGET"),
             paymentAsset: vm.envAddress("PAYMENT_ASSET"),
             principalVault: _envOrZeroAddress("PRINCIPAL_VAULT"),
-            yieldVault: _envOrZeroAddress("YIELD_VAULT"),
             trancheUpperBounds: vm.envUint("TRANCHE_UPPER_BOUNDS", ","),
             tranchePrices: vm.envUint("TRANCHE_PRICES", ",")
         });
@@ -418,7 +397,6 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
         console2.log("SeatToken:", deployed_.seatToken);
         console2.log("PrincipalManager:", deployed_.principalManager);
         console2.log("BondingTranche:", deployed_.bondingTranche);
-        console2.log("FundingSlateExecutor:", deployed_.fundingSlateExecutor);
         console2.log("Strategy:", deployed_.strategy);
         console2.log("Azorius:", deployed_.azorius);
         console2.log("VotingWeight:", deployed_.votingWeight);

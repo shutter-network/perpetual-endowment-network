@@ -26,7 +26,7 @@ contract BondingTrancheTest is Test {
     function setUp() public {
         usdc = new MockUSDC();
         seatToken = new SeatToken("PEN Seat", "SEAT", 10, 365 days, admin, address(0), address(0), address(0));
-        principalManager = new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)), IERC4626(address(0)), address(0));
+        principalManager = new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)));
 
         uint256[] memory upperBounds = new uint256[](3);
         uint256[] memory prices = new uint256[](3);
@@ -138,6 +138,143 @@ contract BondingTrancheTest is Test {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(BondingTranche.PurchaseCostExceedsLimit.selector, 5e6, 4e6));
         bondingTranche.purchase(alice, 4, 4e6);
+    }
+
+    function test_ExtendTranchesReopensSalesBeyondInitialCap() public {
+        MockUSDC usdc2 = new MockUSDC();
+        address admin2 = makeAddr("admin2");
+        address reclaimer2 = makeAddr("reclaimer2");
+        address alice2 = makeAddr("alice2");
+
+        // SeatToken cap can be larger than the initial tranche sale cap.
+        SeatToken seatToken2 = new SeatToken("PEN Seat", "SEAT", 100, 365 days, admin2, address(0), address(0), address(0));
+        PrincipalManager principalManager2 = new PrincipalManager(usdc2, admin2, address(0), 0, IERC4626(address(0)));
+
+        uint256[] memory upperBounds = new uint256[](3);
+        uint256[] memory prices = new uint256[](3);
+        upperBounds[0] = 3;
+        upperBounds[1] = 7;
+        upperBounds[2] = 10; // initial sale cap at 10 seats
+        prices[0] = 1e6;
+        prices[1] = 2e6;
+        prices[2] = 3e6;
+
+        BondingTranche tranche2 =
+            new BondingTranche(seatToken2, principalManager2, REFUND_PRICE, admin2, reclaimer2, upperBounds, prices);
+
+        vm.startPrank(admin2);
+        seatToken2.grantRole(seatToken2.MINTER_ROLE(), address(tranche2));
+        seatToken2.grantRole(seatToken2.BURNER_ROLE(), address(tranche2));
+        principalManager2.grantRole(principalManager2.BONDING_ROLE(), address(tranche2));
+        vm.stopPrank();
+
+        // Buy out the initial cap (10 seats total).
+        usdc2.mint(alice2, 100e6);
+        vm.startPrank(alice2);
+        usdc2.approve(address(tranche2), 100e6);
+        tranche2.purchase(alice2, 10, 30e6);
+        vm.stopPrank();
+
+        // Further purchases are sold out until governance extends tranches.
+        vm.expectRevert(BondingTranche.SoldOut.selector);
+        tranche2.quotePurchase(1);
+
+        // Governance extends the sale cap from 10 -> 12 with a new price tier.
+        uint256[] memory newUpperBounds = new uint256[](1);
+        uint256[] memory newPrices = new uint256[](1);
+        newUpperBounds[0] = 12;
+        newPrices[0] = 5e6;
+
+        vm.prank(admin2);
+        tranche2.extendTranches(newUpperBounds, newPrices);
+
+        // Sales resume for seats 11-12 at the new price.
+        assertEq(tranche2.quotePurchase(1), 5e6);
+
+        usdc2.mint(alice2, 10e6);
+        vm.startPrank(alice2);
+        usdc2.approve(address(tranche2), 10e6);
+        tranche2.purchase(alice2, 2, 10e6);
+        vm.stopPrank();
+
+        assertEq(seatToken2.totalSupply(), 12);
+        assertEq(seatToken2.balanceOf(alice2), 12);
+    }
+
+    function test_ExtendTranchesValidatesInputs() public {
+        MockUSDC usdc2 = new MockUSDC();
+        address admin2 = makeAddr("admin2");
+        address reclaimer2 = makeAddr("reclaimer2");
+        address alice2 = makeAddr("alice2");
+
+        // SeatToken cap can be larger than the initial tranche sale cap.
+        SeatToken seatToken2 = new SeatToken("PEN Seat", "SEAT", 100, 365 days, admin2, address(0), address(0), address(0));
+        PrincipalManager principalManager2 = new PrincipalManager(usdc2, admin2, address(0), 0, IERC4626(address(0)));
+
+        uint256[] memory upperBounds = new uint256[](1);
+        uint256[] memory prices = new uint256[](1);
+        upperBounds[0] = 10;
+        prices[0] = 1e6;
+
+        BondingTranche tranche2 =
+            new BondingTranche(seatToken2, principalManager2, REFUND_PRICE, admin2, reclaimer2, upperBounds, prices);
+
+        vm.startPrank(admin2);
+        seatToken2.grantRole(seatToken2.MINTER_ROLE(), address(tranche2));
+        seatToken2.grantRole(seatToken2.BURNER_ROLE(), address(tranche2));
+        principalManager2.grantRole(principalManager2.BONDING_ROLE(), address(tranche2));
+        vm.stopPrank();
+
+        // Move totalSupply up so we can test upperBound <= currentSupply.
+        usdc2.mint(alice2, 100e6);
+        vm.startPrank(alice2);
+        usdc2.approve(address(tranche2), 100e6);
+        tranche2.purchase(alice2, 5, 5e6);
+        vm.stopPrank();
+
+        // price == 0
+        {
+            uint256[] memory newUpperBounds = new uint256[](1);
+            uint256[] memory newPrices = new uint256[](1);
+            newUpperBounds[0] = 11;
+            newPrices[0] = 0;
+            vm.prank(admin2);
+            vm.expectRevert(BondingTranche.InvalidTrancheConfiguration.selector);
+            tranche2.extendTranches(newUpperBounds, newPrices);
+        }
+
+        // upperBound <= previousUpperBound
+        {
+            uint256[] memory newUpperBounds = new uint256[](1);
+            uint256[] memory newPrices = new uint256[](1);
+            newUpperBounds[0] = 10;
+            newPrices[0] = 2e6;
+            vm.prank(admin2);
+            vm.expectRevert(BondingTranche.InvalidTrancheConfiguration.selector);
+            tranche2.extendTranches(newUpperBounds, newPrices);
+        }
+
+        // upperBound <= currentSupply
+        {
+            uint256[] memory newUpperBounds = new uint256[](1);
+            uint256[] memory newPrices = new uint256[](1);
+            newUpperBounds[0] = 5; // currentSupply is 5
+            newPrices[0] = 2e6;
+            vm.prank(admin2);
+            vm.expectRevert(BondingTranche.InvalidTrancheConfiguration.selector);
+            tranche2.extendTranches(newUpperBounds, newPrices);
+        }
+
+        // upperBound > seatToken.supplyCap()
+        {
+            uint256[] memory newUpperBounds = new uint256[](1);
+            uint256[] memory newPrices = new uint256[](1);
+            newUpperBounds[0] = 101;
+            newPrices[0] = 2e6;
+            vm.prank(admin2);
+            vm.expectRevert(BondingTranche.InvalidTrancheConfiguration.selector);
+            tranche2.extendTranches(newUpperBounds, newPrices);
+        }
     }
 
     function test_ReclaimRevertsWhileHolderIsActive() public {

@@ -27,7 +27,7 @@ contract DonationAttractiveEntryIntegrationTest is Test {
     function setUp() public {
         usdc = new MockUSDC();
         seatToken = new SeatToken("PEN Seat", "SEAT", SUPPLY_CAP, 365 days, admin, address(0), address(0), address(0));
-        principalManager = new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)), IERC4626(address(0)), address(0));
+        principalManager = new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)));
 
         uint256[] memory upperBounds = new uint256[](1);
         uint256[] memory prices = new uint256[](1);
@@ -59,6 +59,7 @@ contract DonationAttractiveEntryIntegrationTest is Test {
 
         usdc.mint(donor, DONATION);
         vm.prank(donor);
+        /// forge-lint: disable-next-line(erc20-unchecked-transfer)
         usdc.transfer(address(principalManager), DONATION);
 
         assertEq(bondingTranche.quotePurchase(1), SEAT_PRICE);

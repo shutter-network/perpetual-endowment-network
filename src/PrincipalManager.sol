@@ -6,57 +6,48 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
-import {FundingSlateExecutor} from "./governance/FundingSlateExecutor.sol";
 
 contract PrincipalManager is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant BONDING_ROLE = keccak256("BONDING_ROLE");
 
-    error ActiveVaultPositionExists(address vault, uint256 shares);
-    error InsufficientAvailableYield(uint256 requested, uint256 available);
     error InsufficientLiquidity(uint256 requested, uint256 available);
     error InvalidAdmin(address admin);
     error InvalidAmount();
     error InvalidAsset(address asset);
-    error InvalidFundingSlate(uint32 proposalId, uint16 slateId);
-    error InvalidFundingSlateExecutor(address executor);
+    error InvalidFundingParams();
     error InvalidPrincipalVault(address vault);
     error InvalidPrincipalVaultAsset(address vault, address asset);
-    error InvalidYieldReceiver(address receiver);
-    error InvalidYieldVault(address vault);
-    error InvalidYieldVaultAsset(address vault, address asset);
+    error InvalidVault(address vault);
+    error InvalidVaultAsset(address vault, address asset);
+    error InvalidReceiver(address receiver);
     error PrincipalInsolvent(uint256 accountedPrincipal, uint256 totalManagedAssets);
     error PrincipalUnderflow(uint256 accountedPrincipal, uint256 amount);
 
     IERC20 public immutable asset;
     IERC4626 public principalVault;
-    IERC4626 public yieldVault;
-    address public yieldVaultReceiver;
-    FundingSlateExecutor public fundingSlateExecutor;
+    IERC4626[] public previousPrincipalVaults;
+    mapping(address vault => bool) private _isPreviousPrincipalVault;
     uint256 public accountedPrincipal;
     uint256 public liquidReserveTarget;
 
     event AccountedPrincipalDecreased(uint256 previousPrincipal, uint256 newPrincipal, uint256 amount);
     event AccountedPrincipalIncreased(uint256 previousPrincipal, uint256 newPrincipal, uint256 amount);
     event LiquidReserveTargetUpdated(uint256 previousTarget, uint256 newTarget);
-    event FundingExecuted(uint32 indexed proposalId, uint16 indexed winningSlate, uint256 distributedAmount);
-    event FundingSlateExecutorUpdated(address indexed previousExecutor, address indexed newExecutor);
+    event FundingExecuted(address[] indexed recipients, uint256[] amounts);
     event RefundPaid(address indexed receiver, uint256 amount);
     event PrincipalVaultDeposit(address indexed vault, uint256 assets, uint256 shares);
     event PrincipalVaultUpdated(address indexed previousVault, address indexed newVault);
-    event PrincipalVaultWithdrawal(address indexed vault, uint256 assets, uint256 shares);
-    event YieldTransferred(address indexed yieldVault, address indexed receiver, uint256 assets, uint256 shares);
-    event YieldVaultUpdated(address indexed previousVault, address indexed newVault, address indexed receiver);
+    event PrincipalVaultWithdrawal(address indexed vault, address indexed receiver, uint256 assets, uint256 shares);
+    event VaultWithdrawal(address indexed vault, address indexed receiver, uint256 assets, uint256 shares);
 
     constructor(
         IERC20 asset_,
         address admin_,
         address bonding_,
         uint256 liquidReserveTarget_,
-        IERC4626 initialPrincipalVault_,
-        IERC4626 initialYieldVault_,
-        address initialYieldReceiver_
+        IERC4626 initialPrincipalVault_
     ) {
         if (address(asset_) == address(0)) revert InvalidAsset(address(asset_));
         if (admin_ == address(0)) revert InvalidAdmin(admin_);
@@ -68,7 +59,6 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         _grantOptionalRole(BONDING_ROLE, bonding_);
 
         _setPrincipalVault(initialPrincipalVault_);
-        _setYieldVault(initialYieldVault_, initialYieldReceiver_);
     }
 
     function recordPurchase(uint256 amount) external onlyRole(BONDING_ROLE) nonReentrant returns (uint256 shares) {
@@ -106,17 +96,11 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         _setPrincipalVault(newVault);
     }
 
-    function setYieldVault(IERC4626 newYieldVault, address receiver) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _setYieldVault(newYieldVault, receiver);
-    }
-
     function _setPrincipalVault(IERC4626 newVault) internal {
         IERC4626 previousVault = principalVault;
         if (address(previousVault) != address(0) && address(previousVault) != address(newVault)) {
-            uint256 currentShares = previousVault.balanceOf(address(this));
-            if (currentShares != 0) revert ActiveVaultPositionExists(address(previousVault), currentShares);
-
             asset.forceApprove(address(previousVault), 0);
+            _trackPreviousVault(previousVault);
         }
 
         if (address(newVault) != address(0)) {
@@ -130,27 +114,12 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         emit PrincipalVaultUpdated(address(previousVault), address(newVault));
     }
 
-    function _setYieldVault(IERC4626 newYieldVault, address receiver) internal {
-        IERC4626 previousVault = yieldVault;
-        if (address(previousVault) != address(0) && address(previousVault) != address(newYieldVault)) {
-            uint256 currentShares = previousVault.balanceOf(address(this));
-            if (currentShares != 0) revert ActiveVaultPositionExists(address(previousVault), currentShares);
-            asset.forceApprove(address(previousVault), 0);
-        }
+    function previousPrincipalVaultCount() external view returns (uint256) {
+        return previousPrincipalVaults.length;
+    }
 
-        if (address(newYieldVault) != address(0)) {
-            if (newYieldVault.asset() != address(asset)) {
-                revert InvalidYieldVaultAsset(address(newYieldVault), address(asset));
-            }
-            if (receiver == address(0)) revert InvalidYieldReceiver(receiver);
-            asset.forceApprove(address(newYieldVault), type(uint256).max);
-        } else if (receiver != address(0)) {
-            revert InvalidYieldVault(address(0));
-        }
-
-        yieldVault = newYieldVault;
-        yieldVaultReceiver = receiver;
-        emit YieldVaultUpdated(address(previousVault), address(newYieldVault), receiver);
+    function isPrincipalVaultSet() public view returns (bool) {
+        return address(principalVault) != address(0);
     }
 
     function setLiquidReserveTarget(uint256 newTarget) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -160,69 +129,42 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         emit LiquidReserveTargetUpdated(previousTarget, newTarget);
     }
 
-    function setFundingSlateExecutor(FundingSlateExecutor newExecutor) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        FundingSlateExecutor previousExecutor = fundingSlateExecutor;
-        fundingSlateExecutor = newExecutor;
-
-        emit FundingSlateExecutorUpdated(address(previousExecutor), address(newExecutor));
-    }
-
     function depositExcessToPrincipalVault() external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant returns (uint256 shares) {
         return _depositExcessToPrincipalVault();
     }
 
-    function transferYieldToVault(uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
-        if (amount == 0) revert InvalidAmount();
-
-        IERC4626 currentYieldVault = yieldVault;
-        if (address(currentYieldVault) == address(0)) revert InvalidYieldVault(address(0));
-        address receiver = yieldVaultReceiver;
-        if (receiver == address(0)) revert InvalidYieldReceiver(receiver);
-
-        uint256 available = availableYield();
-        if (amount > available) revert InsufficientAvailableYield(amount, available);
-
-        _ensureLiquidity(amount);
-        uint256 shares = currentYieldVault.deposit(amount, receiver);
-
-        emit YieldTransferred(address(currentYieldVault), receiver, amount, shares);
-    }
-
-    function executeFunding(uint32 proposalId)
+    /// @notice Distribute funds to multiple recipients (governance-controlled).
+    /// @dev PEN keeps this as a single-call “batch payout” primitive because it is materially cheaper
+    ///      than executing 1 + N separate Safe/Azorius transactions (withdraw to Safe + N ERC20 transfers),
+    ///      especially as N grows.
+    ///
+    ///      This function intentionally does NOT decrease `accountedPrincipal`.
+    ///      `accountedPrincipal` represents the principal obligation created when seats are sold (used for refunds).
+    ///      Funding payouts are intended to be paid from yield / excess assets not by reducing the refund obligation.
+    function executeFunding(address[] calldata recipients, uint256[] calldata amounts)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
         nonReentrant
-        returns (uint16 winningSlate, uint256 distributedAmount)
+        returns (uint256 distributedAmount)
     {
-        FundingSlateExecutor currentExecutor = fundingSlateExecutor;
-        if (address(currentExecutor) == address(0)) revert InvalidFundingSlateExecutor(address(0));
+        uint256 length = recipients.length;
+        if (length == 0 || length != amounts.length) revert InvalidFundingParams();
 
-        IERC4626 currentYieldVault = yieldVault;
-        if (address(currentYieldVault) == address(0)) revert InvalidYieldVault(address(0));
-        if (yieldVaultReceiver != address(this)) revert InvalidYieldReceiver(yieldVaultReceiver);
-
-        bool resolved;
-        (winningSlate, resolved) = currentExecutor.strategy().getWinningSlate(proposalId);
-        if (!resolved) revert InvalidFundingSlate(proposalId, winningSlate);
-
-        if (winningSlate == currentExecutor.strategy().DEFAULT_SLATE_ID()) {
-            emit FundingExecuted(proposalId, winningSlate, 0);
-            return (winningSlate, 0);
+        for (uint256 i; i < length; ++i) {
+            address recipient = recipients[i];
+            uint256 amount = amounts[i];
+            if (recipient == address(0)) revert InvalidReceiver(recipient);
+            if (amount == 0) revert InvalidAmount();
+            distributedAmount += amount;
         }
 
-        address[] memory recipients;
-        uint256[] memory amounts;
-        bool exists;
-        (recipients, amounts, distributedAmount, exists) = currentExecutor.slateOf(proposalId, winningSlate);
-        if (!exists) revert InvalidFundingSlate(proposalId, winningSlate);
+        _ensureLiquidity(distributedAmount);
 
-        currentYieldVault.withdraw(distributedAmount, address(this), address(this));
-
-        for (uint256 i; i < recipients.length; ++i) {
+        for (uint256 i; i < length; ++i) {
             asset.safeTransfer(recipients[i], amounts[i]);
         }
 
-        emit FundingExecuted(proposalId, winningSlate, distributedAmount);
+        emit FundingExecuted(recipients, amounts);
     }
 
     function depositToPrincipalVault(uint256 assets)
@@ -239,7 +181,7 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         shares = _depositToPrincipalVault(assets);
     }
 
-    function withdrawFromPrincipalVault(uint256 assets)
+    function withdrawFromPrincipalVault(uint256 assets, address receiver)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
         nonReentrant
@@ -249,37 +191,51 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         IERC4626 currentVault = principalVault;
         if (address(currentVault) == address(0)) revert InvalidPrincipalVault(address(0));
 
-        shares = currentVault.withdraw(assets, address(this), address(this));
-        emit PrincipalVaultWithdrawal(address(currentVault), assets, shares);
+        address resolvedReceiver = receiver == address(0) ? address(this) : receiver;
+        shares = currentVault.withdraw(assets, resolvedReceiver, address(this));
+
+        emit PrincipalVaultWithdrawal(address(currentVault), resolvedReceiver, assets, shares);
+    }
+
+    function withdrawFromVault(IERC4626 vault, uint256 assets, address receiver)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        nonReentrant
+        returns (uint256 shares)
+    {
+        if (assets == 0) revert InvalidAmount();
+        if (address(vault) == address(0)) revert InvalidVault(address(0));
+        if (vault.asset() != address(asset)) {
+            revert InvalidVaultAsset(address(vault), address(asset));
+        }
+
+        address resolvedReceiver = receiver == address(0) ? address(this) : receiver;
+        shares = vault.withdraw(assets, resolvedReceiver, address(this));
+
+        emit VaultWithdrawal(address(vault), resolvedReceiver, assets, shares);
     }
 
     function liquidAssets() public view returns (uint256) {
         return asset.balanceOf(address(this));
     }
 
-    function deployedPrincipalAssets() public view returns (uint256) {
-        IERC4626 currentVault = principalVault;
-        if (address(currentVault) == address(0)) {
-            return 0;
-        }
-
-        uint256 shares = currentVault.balanceOf(address(this));
-        if (shares == 0) {
-            return 0;
-        }
-
-        return currentVault.convertToAssets(shares);
-    }
-
     function deployedAssets() public view returns (uint256) {
-        return deployedPrincipalAssets();
+        IERC4626 currentVault = principalVault;
+        if (address(currentVault) != address(0)) {
+            uint256 currentShares = currentVault.balanceOf(address(this));
+            if (currentShares != 0) {
+                return _deployedAssetsFromPreviousVaults(currentVault.convertToAssets(currentShares), currentVault);
+            }
+        }
+
+        return _deployedAssetsFromPreviousVaults(0, currentVault);
     }
 
     function totalManagedAssets() public view returns (uint256) {
-        return liquidAssets() + deployedPrincipalAssets();
+        return liquidAssets() + deployedAssets();
     }
 
-    function availableYield() public view returns (uint256) { //TODO: need to check if this needs to know available yield from vaults, rather than calculating here
+    function availableYield() public view returns (uint256) {
         uint256 totalAssets = totalManagedAssets();
         if (totalAssets <= accountedPrincipal) {
             return 0;
@@ -335,7 +291,7 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         }
 
         uint256 shares = currentVault.withdraw(shortfall, address(this), address(this));
-        emit PrincipalVaultWithdrawal(address(currentVault), shortfall, shares);
+        emit PrincipalVaultWithdrawal(address(currentVault), address(this), shortfall, shares);
     }
 
     function _grantOptionalRole(bytes32 role, address account) internal {
@@ -344,5 +300,38 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         }
 
         _grantRole(role, account);
+    }
+
+    function _trackPreviousVault(IERC4626 vault) internal {
+        address vaultAddress = address(vault);
+        if (_isPreviousPrincipalVault[vaultAddress]) {
+            return;
+        }
+
+        _isPreviousPrincipalVault[vaultAddress] = true;
+        previousPrincipalVaults.push(vault);
+    }
+
+    function _deployedAssetsFromPreviousVaults(uint256 baseAssets, IERC4626 currentVault)
+        internal
+        view
+        returns (uint256 assets)
+    {
+        assets = baseAssets;
+        uint256 length = previousPrincipalVaults.length;
+
+        for (uint256 i; i < length; ++i) {
+            IERC4626 vault = previousPrincipalVaults[i];
+            if (address(vault) == address(currentVault)) {
+                continue; // avoid double-counting when current vault is also historical
+            }
+
+            uint256 shares = vault.balanceOf(address(this));
+            if (shares == 0) {
+                continue;
+            }
+
+            assets += vault.convertToAssets(shares);
+        }
     }
 }

@@ -11,6 +11,7 @@ lib/**/node_modules/
 # Environment and local config
 .env
 .env.*
+!.env.example
 
 # macOS
 .DS_Store

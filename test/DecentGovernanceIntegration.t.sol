@@ -3,18 +3,18 @@ pragma solidity ^0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {Clones} from "openzeppelin-contracts/contracts/proxy/Clones.sol";
-import {IAccessControl} from "openzeppelin-contracts/contracts/access/IAccessControl.sol";
 import {ERC20Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC20Mock.sol";
-import {ERC4626Mock} from "openzeppelin-contracts/contracts/mocks/token/ERC4626Mock.sol";
+import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 
 import {SeatToken} from "../src/SeatToken.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
-import {PENRankedChoiceStrategy} from "../src/governance/PENRankedChoiceStrategy.sol";
+import {PENStrategyV1} from "../src/governance/PENStrategyV1.sol";
 
 import {Transaction} from "decent-contracts/contracts/interfaces/decent/Module.sol";
 import {IVotingTypes} from "decent-contracts/contracts/interfaces/decent/deployables/IVotingTypes.sol";
 import {IModuleAzoriusV1} from "decent-contracts/contracts/interfaces/decent/deployables/IModuleAzoriusV1.sol";
+import {IStrategyV1} from "decent-contracts/contracts/interfaces/decent/deployables/IStrategyV1.sol";
 import {ModuleAzoriusV1} from "decent-contracts/contracts/deployables/modules/ModuleAzoriusV1.sol";
 import {VotingWeightERC20V1} from "decent-contracts/contracts/deployables/strategies/voting-weight/VotingWeightERC20V1.sol";
 import {VoteTrackerERC20V1} from "decent-contracts/contracts/deployables/strategies/vote-trackers/VoteTrackerERC20V1.sol";
@@ -35,7 +35,7 @@ contract DecentGovernanceIntegrationTest is Test {
     SeatToken internal seatToken;
     ERC20Mock internal asset;
     PrincipalManager internal principalManager;
-    PENRankedChoiceStrategy internal strategy;
+    PENStrategyV1 internal strategy;
     ModuleAzoriusV1 internal azorius;
     VotingWeightERC20V1 internal votingWeight;
     VoteTrackerERC20V1 internal voteTracker;
@@ -68,9 +68,7 @@ contract DecentGovernanceIntegrationTest is Test {
             address(avatar),
             address(0),
             100,
-            ERC4626Mock(address(0)),
-            ERC4626Mock(address(0)),
-            address(0)
+            IERC4626(address(0))
         );
 
         strategy = _deployStrategy();
@@ -114,21 +112,12 @@ contract DecentGovernanceIntegrationTest is Test {
         assertEq(azorius.totalProposalCount(), 1);
         assertEq(uint8(azorius.proposalState(PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.ACTIVE));
 
-        vm.prank(alice);
-        strategy.submitSlate(PROPOSAL_ID, 1);
-        vm.prank(bob);
-        strategy.submitSlate(PROPOSAL_ID, 2);
-
         vm.warp(block.timestamp + 1);
 
-        _castVote(alice, _ranking(1, 2, 0));
-        _castVote(bob, _ranking(2, 1, 0));
-        _castVote(carol, _ranking(0, 2, 1));
-        _castVote(dave, _ranking(0, 2, 1));
-
-        (uint16 winningSlate, bool resolved) = strategy.getWinningSlate(PROPOSAL_ID);
-        assertTrue(resolved);
-        assertEq(winningSlate, 2);
+        _castYes(alice);
+        _castYes(bob);
+        _castYes(carol);
+        _castYes(dave);
 
         vm.warp(block.timestamp + VOTING_PERIOD + 1);
         assertEq(uint8(azorius.proposalState(PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.TIMELOCKED));
@@ -142,71 +131,9 @@ contract DecentGovernanceIntegrationTest is Test {
         assertEq(uint8(azorius.proposalState(PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.EXECUTED));
     }
 
-    function test_OnlyAvatarGovernanceCanSetYieldVault() public {
-        ERC4626Mock newYieldVault = new ERC4626Mock(address(asset));
-
-        vm.startPrank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector,
-                alice,
-                principalManager.DEFAULT_ADMIN_ROLE()
-            )
-        );
-        principalManager.setYieldVault(newYieldVault, address(avatar));
-        vm.stopPrank();
-
-        Transaction[] memory transactions = new Transaction[](1);
-        transactions[0] = Transaction({
-            to: address(principalManager),
-            value: 0,
-            data: abi.encodeCall(PrincipalManager.setYieldVault, (newYieldVault, address(avatar))),
-            operation: Enum.Operation.Call
-        });
-
-        vm.prank(alice);
-        azorius.submitProposal(
-            transactions,
-            "ipfs://pen-proposal/set-yield-vault",
-            address(proposerAdapter),
-            ""
-        );
-
-        assertEq(azorius.totalProposalCount(), 1);
-        assertEq(uint8(azorius.proposalState(PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.ACTIVE));
-
-        vm.prank(alice);
-        strategy.submitSlate(PROPOSAL_ID, 1);
-        vm.prank(bob);
-        strategy.submitSlate(PROPOSAL_ID, 2);
-
-        vm.warp(block.timestamp + 1);
-
-        _castVote(alice, _ranking(1, 2, 0));
-        _castVote(bob, _ranking(2, 1, 0));
-        _castVote(carol, _ranking(0, 2, 1));
-        _castVote(dave, _ranking(0, 2, 1));
-
-        (uint16 winningSlate, bool resolved) = strategy.getWinningSlate(PROPOSAL_ID);
-        assertTrue(resolved);
-        assertEq(winningSlate, 2);
-
-        vm.warp(block.timestamp + VOTING_PERIOD + 1);
-        assertEq(uint8(azorius.proposalState(PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.TIMELOCKED));
-
-        vm.warp(block.timestamp + TIMELOCK_PERIOD + 1);
-        assertEq(uint8(azorius.proposalState(PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.EXECUTABLE));
-
-        azorius.executeProposal(PROPOSAL_ID, transactions);
-
-        assertEq(address(principalManager.yieldVault()), address(newYieldVault));
-        assertEq(principalManager.yieldVaultReceiver(), address(avatar));
-        assertEq(uint8(azorius.proposalState(PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.EXECUTED));
-    }
-
-    function _deployStrategy() internal returns (PENRankedChoiceStrategy deployed) {
-        PENRankedChoiceStrategy implementation = new PENRankedChoiceStrategy();
-        deployed = PENRankedChoiceStrategy(Clones.clone(address(implementation)));
+    function _deployStrategy() internal returns (PENStrategyV1 deployed) {
+        PENStrategyV1 implementation = new PENStrategyV1();
+        deployed = PENStrategyV1(Clones.clone(address(implementation)));
     }
 
     function _deployVotingWeight() internal returns (VotingWeightERC20V1 deployed) {
@@ -240,18 +167,16 @@ contract DecentGovernanceIntegrationTest is Test {
         );
     }
 
-    function _castVote(address voter, uint16[] memory ranking) internal {
+    function _castYes(address voter) internal {
         vm.prank(voter);
-        strategy.castVote(PROPOSAL_ID, 1, _voteData(ranking), 0);
+        strategy.castVote(PROPOSAL_ID, uint8(IStrategyV1.VoteType.YES), _voteData(), 0);
     }
 
-    function _voteData(
-        uint16[] memory ranking
-    ) internal pure returns (IVotingTypes.VotingConfigVoteData[] memory votingConfigsData) {
+    function _voteData() internal pure returns (IVotingTypes.VotingConfigVoteData[] memory votingConfigsData) {
         votingConfigsData = new IVotingTypes.VotingConfigVoteData[](1);
         votingConfigsData[0] = IVotingTypes.VotingConfigVoteData({
             configIndex: 0,
-            voteData: abi.encode(ranking)
+            voteData: ""
         });
     }
 
@@ -272,14 +197,4 @@ contract DecentGovernanceIntegrationTest is Test {
         });
     }
 
-    function _ranking(
-        uint16 first,
-        uint16 second,
-        uint16 third
-    ) internal pure returns (uint16[] memory ranking) {
-        ranking = new uint16[](3);
-        ranking[0] = first;
-        ranking[1] = second;
-        ranking[2] = third;
-    }
 }

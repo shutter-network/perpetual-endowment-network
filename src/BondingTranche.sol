@@ -32,6 +32,8 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     uint256[] private _trancheUpperBounds;
     uint256[] private _tranchePrices;
 
+    event TrancheExtended(uint256 previousUpperBound, uint256 newUpperBound, uint256 pricePerSeat);
+
     event SeatsPurchased(
         address indexed payer, address indexed recipient, uint256 seats, uint256 totalCost, uint256 newTotalSupply
     );
@@ -58,16 +60,20 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
         }
 
         uint256 previousUpperBound;
+        uint256 previousPrice;
         uint256 length = trancheUpperBounds_.length;
         for (uint256 i; i < length; ++i) {
             uint256 upperBound = trancheUpperBounds_[i];
             uint256 price = tranchePrices_[i];
 
             if (upperBound <= previousUpperBound || price == 0) revert InvalidTrancheConfiguration();
+            if (i != 0 && price < previousPrice) revert InvalidTrancheConfiguration();
             previousUpperBound = upperBound;
+            previousPrice = price;
         }
 
-        if (trancheUpperBounds_[length - 1] != seatToken_.supplyCap()) {
+        // The bonding tranche sale cap is determined by the final tranche upper bound.
+        if (trancheUpperBounds_[length - 1] > seatToken_.supplyCap()) {
             revert InvalidTrancheConfiguration();
         }
 
@@ -89,6 +95,39 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     function tranche(uint256 index) external view returns (uint256 upperBound, uint256 pricePerSeat) {
         upperBound = _trancheUpperBounds[index];
         pricePerSeat = _tranchePrices[index];
+    }
+
+    /// @notice Append new tranche(s) to extend the sale cap (governance-controlled).
+    /// @dev The new upper bounds must be strictly increasing and <= SeatToken's supply cap.
+    function extendTranches(uint256[] calldata newUpperBounds, uint256[] calldata newPrices)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        nonReentrant
+    {
+        uint256 length = newUpperBounds.length;
+        if (length == 0 || length != newPrices.length) revert InvalidTrancheConfiguration();
+
+        uint256 previousUpperBound = _trancheUpperBounds[_trancheUpperBounds.length - 1];
+        uint256 previousPrice = _tranchePrices[_tranchePrices.length - 1];
+        uint256 currentSupply = seatToken.totalSupply();
+
+        for (uint256 i; i < length; ++i) {
+            uint256 upperBound = newUpperBounds[i];
+            uint256 price = newPrices[i];
+
+            if (price == 0) revert InvalidTrancheConfiguration();
+            if (price < previousPrice) revert InvalidTrancheConfiguration();
+            if (upperBound <= previousUpperBound) revert InvalidTrancheConfiguration();
+            if (upperBound <= currentSupply) revert InvalidTrancheConfiguration();
+            if (upperBound > seatToken.supplyCap()) revert InvalidTrancheConfiguration();
+
+            _trancheUpperBounds.push(upperBound);
+            _tranchePrices.push(price);
+            emit TrancheExtended(previousUpperBound, upperBound, price);
+
+            previousUpperBound = upperBound;
+            previousPrice = price;
+        }
     }
 
     function quotePurchase(uint256 amount) public view returns (uint256 totalCost) {

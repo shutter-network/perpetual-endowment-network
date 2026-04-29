@@ -5,7 +5,6 @@ This repository contains the current PEN core contracts implemented in Foundry:
 - `SeatToken`: non-transferable `ERC20Votes` seat token with `decimals = 0`
 - `BondingTranche`: seat sale, fixed refund, and inactivity reclaim logic
 - `PrincipalManager`: principal treasury controller with refund liquidity management, principal accounting, and external ERC-4626 vault integrations
-- `FundingSlateExecutor`: governance-owned yield-vault receiver that stores slate payloads and executes winning funding distributions
 
 ## Setup
 
@@ -15,12 +14,37 @@ After cloning the repo, initialize submodules before building or testing:
 git submodule update --init --recursive
 ```
 
+## PEN Blueprint + governance flow (end-to-end)
+
+PEN is designed as a minimal on-chain core with off-chain slate selection:
+
+- **On-chain (PEN blueprint)**:
+  - `SeatToken` + `BondingTranche` + `PrincipalManager`
+  - a **Decent Azorius** governance instance with a **YES/NO strategy** (`PENStrategyV1` wrapping Decent `StrategyV1`)
+- **Off-chain**:
+  - Ranked-choice slate formation and selection on **Snapshot**
+
+### Funding flow (Snapshot ranked-choice → Azorius execution)
+
+1. **Forum / discussion (optional)**: community proposes candidate slates off-chain (each slate = recipients + amounts, plus a “none of the above” option).
+2. **Snapshot (ranked-choice)**: members vote off-chain; the outcome is a *single winning slate* (recipients + amounts).
+3. **Azorius proposal creation (on-chain)**: a member creates a proposal that encodes the *winning slate* as executable transactions.
+4. **Azorius vote (on-chain, YES/NO)**: seat holders vote YES/NO under the Decent strategy.
+5. **Execute (on-chain)**: once timelock elapses, the proposal becomes executable and the encoded transactions can be executed.
+
+For PEN treasury batch payouts, the canonical execution transaction is:
+
+- `PrincipalManager.executeFunding(recipients, amounts)`
+
+This single-call “batch payout” primitive is materially cheaper (under Azorius execution) than executing 1 + N transactions (withdraw to Safe + N ERC20 transfers).
+Take a look at the [PEN Operator Guide](docs/pen-operator-guide.md).
+
 ## Contract Roles
 
 - `SeatToken`
   - `MINTER_ROLE`: bonding contract mints seats on purchase
   - `BURNER_ROLE`: bonding contract burns seats on refund or reclaim
-  - `ACTIVITY_ROLE`: future governance integration records vote activity
+  - `ACTIVITY_ROLE`: governance voting refreshes seat activity (via `PENStrategyV1`)
 - `BondingTranche`
   - `DEFAULT_ADMIN_ROLE`: config/admin role
   - `RECLAIMER_ROLE`: allowed to reclaim inactive seats
@@ -65,52 +89,25 @@ Reclaims also reduce total seat supply, so they move pricing backward in the sam
 
 - `PrincipalManager` is the PEN principal treasury controller.
 - The ERC-4626 vault is the principal deployment venue.
-- The yield vault is also an external ERC-4626 vault.
 - Purchase proceeds land in `PrincipalManager` first for accounting and refund liquidity handling.
 - Excess liquidity is then deposited into the vault automatically on purchase or manually by the treasury admin.
 - `accountedPrincipal` tracks the protocol's principal obligation.
 - `availableYield = max(totalManagedAssets - accountedPrincipal, 0)`.
-- Principal is never distributed as grants from these contracts.
 
 ## Yield Flow
 
-1. Principal remains associated with `PrincipalManager` and the configured ERC-4626 vault.
-2. Yield is defined as any raw-asset value above `accountedPrincipal`.
-3. Governance sets the external yield-vault address and receiver on `PrincipalManager`.
-4. The intended receiver is `PrincipalManager` itself, which holds the yield-vault shares on behalf of the governance system.
-5. When governance wants to move yield, it calls `PrincipalManager.transferYieldToVault(amount)`.
-6. `PrincipalManager` verifies that `amount <= availableYield()`.
-7. If needed, `PrincipalManager` withdraws raw assets from the principal ERC-4626 vault.
-8. `PrincipalManager` deposits those raw assets into the external yield ERC-4626 vault using itself as the receiver.
-9. Seat holders register funding slates in `FundingSlateExecutor`, and a governance proposal can later call `PrincipalManager.executeFunding(proposalId)` to redeem yield-vault shares and distribute the winning slate.
+1. Principal remains associated with `PrincipalManager` and the configured ERC-4626 principal vault (`principalVault`).
+2. Yield is defined as any raw-asset value above `accountedPrincipal`:
+   - `availableYield = max(totalManagedAssets - accountedPrincipal, 0)`
+3. Off-chain, the community selects a *winning slate* (recipients + amounts) via Snapshot ranked-choice voting.
+4. On-chain, a member creates a Decent Azorius proposal encoding the winning slate as a batch payout:
+   - `PrincipalManager.executeFunding(recipients, amounts)`
+5. On execution, `PrincipalManager` pays from liquid assets first, and if needed withdraws the shortfall from the ERC-4626 principal vault to reach the required liquidity.
+6. `accountedPrincipal` is not changed by funding execution; it remains the refund obligation created when seats were sold.
 
-Only yield can be moved to the external yield vault; principal accounting is unchanged by yield transfers.
-
-## Quorum And Slate Voting
-
-- `PENRankedChoiceStrategy` uses ranked-choice voting to determine which slate wins.
-- Quorum is not part of the winner-selection algorithm. The winner is resolved from ballot rankings and voting weights alone.
-- Quorum is checked separately when deciding whether the proposal has passed.
-- In practice, each valid ranked ballot is cast as a `YES` vote with the holder's ERC-20 seat weight.
-- Because of that, quorum is effectively: total ranked-ballot voting weight cast must be at least `quorumThreshold`.
-- This means a winning slate can exist even when quorum is not met. In that case, the proposal does not pass and cannot be executed.
-
-So the flow is:
-1. ranked-choice picks the winning slate
-2. quorum determines whether that result is actionable as a passed proposal
-
-## Default Slate Behavior
-
-- `PENRankedChoiceStrategy` always initializes each proposal with default slate `0`.
-- Slate `0` is a fallback voting option, not a registered payout slate with recipients and amounts.
-- If ranked-choice voting resolves to slate `0`, `PrincipalManager.executeFunding(...)` performs no distribution and leaves the assets in the yield vault.
-- This means the current system behavior for a default-slate win is "leave yield parked in the yield vault," not "automatically reinvest into principal."
-
-This distinction is intentional in the current codebase. Reinvestment can be added later as an explicit execution path, but it is not encoded today.
 
 ## Current Limitations
 
-- Default slate `0` currently behaves as a no-op in `PrincipalManager`; explicit reinvest execution is still a separate step.
 - The ERC-4626 integration is generic for now; tests use demo ERC-4626 vaults, while production is expected to point at Octant v2-compatible vaults.
 
 ## Commands
@@ -138,7 +135,7 @@ forge fmt
 The repository includes two deployment-facing scripts:
 
 - `PreviewPENSystem.s.sol`: previews the full address plan from a deployer address, current nonce, and `DEPLOYMENT_SALT`
-- `DeployPENSystem.s.sol`: deploys the Safe singleton, Safe proxy factory, Safe bootstrap helper, governance stack, core treasury contracts, and optional funding executor in one script run
+- `DeployPENSystem.s.sol`: deploys the Safe singleton, Safe proxy factory, Safe bootstrap helper, governance stack, and core treasury contracts in one script run
 
 The deployment flow is:
 1. derive the deployer address and starting nonce
@@ -179,7 +176,6 @@ Optional environment variables:
 
 - `DEPLOYER_NONCE`: preview against a specific nonce instead of the current on-chain nonce
 - `PRINCIPAL_VAULT`
-- `YIELD_VAULT`
 - `LIGHT_ACCOUNT_FACTORY`
 
 Preview example:

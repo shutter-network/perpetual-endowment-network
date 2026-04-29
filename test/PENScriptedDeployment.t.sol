@@ -9,12 +9,13 @@ import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
 import {SeatToken} from "../src/SeatToken.sol";
-import {PENRankedChoiceStrategy} from "../src/governance/PENRankedChoiceStrategy.sol";
+import {PENStrategyV1} from "../src/governance/PENStrategyV1.sol";
 import {PENDeploymentHelper} from "../script/PENDeploymentScriptBase.s.sol";
 
 import {Transaction} from "decent-contracts/contracts/interfaces/decent/Module.sol";
 import {IVotingTypes} from "decent-contracts/contracts/interfaces/decent/deployables/IVotingTypes.sol";
 import {IModuleAzoriusV1} from "decent-contracts/contracts/interfaces/decent/deployables/IModuleAzoriusV1.sol";
+import {IStrategyV1} from "decent-contracts/contracts/interfaces/decent/deployables/IStrategyV1.sol";
 import {ModuleAzoriusV1} from "decent-contracts/contracts/deployables/modules/ModuleAzoriusV1.sol";
 import {Safe} from "@gnosis.pm/safe-contracts/contracts/Safe.sol";
 
@@ -31,12 +32,10 @@ contract PENScriptedDeploymentTest is Test, PENDeploymentHelper {
 
     ERC20Mock internal asset;
     ERC4626Mock internal principalVault;
-    ERC4626Mock internal yieldVault;
 
     function setUp() public {
         asset = new ERC20Mock();
         principalVault = new ERC4626Mock(address(asset));
-        yieldVault = new ERC4626Mock(address(asset));
     }
 
     function test_DeploySystemHandsOffAccessToSafe() public {
@@ -61,9 +60,6 @@ contract PENScriptedDeploymentTest is Test, PENDeploymentHelper {
         assertFalse(principalManager.hasRole(principalManager.DEFAULT_ADMIN_ROLE(), address(this)));
         assertTrue(principalManager.hasRole(principalManager.BONDING_ROLE(), deployed.bondingTranche));
         assertEq(address(principalManager.principalVault()), address(principalVault));
-        assertEq(address(principalManager.yieldVault()), address(yieldVault));
-        assertEq(principalManager.yieldVaultReceiver(), deployed.principalManager);
-        assertEq(address(principalManager.fundingSlateExecutor()), deployed.fundingSlateExecutor);
 
         assertTrue(bondingTranche.hasRole(bondingTranche.DEFAULT_ADMIN_ROLE(), deployed.safe));
         assertFalse(bondingTranche.hasRole(bondingTranche.DEFAULT_ADMIN_ROLE(), address(this)));
@@ -82,7 +78,7 @@ contract PENScriptedDeploymentTest is Test, PENDeploymentHelper {
 
         BondingTranche bondingTranche = BondingTranche(deployed.bondingTranche);
         PrincipalManager principalManager = PrincipalManager(deployed.principalManager);
-        PENRankedChoiceStrategy strategy = PENRankedChoiceStrategy(deployed.strategy);
+        PENStrategyV1 strategy = PENStrategyV1(deployed.strategy);
         ModuleAzoriusV1 azorius = ModuleAzoriusV1(deployed.azorius);
 
         _buySeats(alice, bondingTranche, 4);
@@ -100,20 +96,11 @@ contract PENScriptedDeploymentTest is Test, PENDeploymentHelper {
         vm.prank(alice);
         azorius.submitProposal(transactions, "ipfs://pen-scripted/liquid-reserve-update", deployed.proposerAdapter, "");
 
-        vm.prank(alice);
-        strategy.submitSlate(PROPOSAL_ID, 1);
-        vm.prank(bob);
-        strategy.submitSlate(PROPOSAL_ID, 2);
-
         vm.warp(block.timestamp + 1);
 
-        _castVote(strategy, alice, _ranking(1, 2, 0));
-        _castVote(strategy, bob, _ranking(2, 1, 0));
-        _castVote(strategy, carol, _ranking(2, 1, 0));
-
-        (uint16 winningSlate, bool resolved) = strategy.getWinningSlate(PROPOSAL_ID);
-        assertTrue(resolved);
-        assertEq(winningSlate, 2);
+        _castYes(strategy, alice);
+        _castYes(strategy, bob);
+        _castYes(strategy, carol);
 
         vm.warp(block.timestamp + VOTING_PERIOD + 1);
         assertEq(uint8(azorius.proposalState(PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.TIMELOCKED));
@@ -137,7 +124,6 @@ contract PENScriptedDeploymentTest is Test, PENDeploymentHelper {
             liquidReserveTarget: 0,
             paymentAsset: address(asset),
             principalVault: address(principalVault),
-            yieldVault: address(yieldVault),
             trancheUpperBounds: _singleUintArray(10),
             tranchePrices: _singleUintArray(1 ether)
         });
@@ -163,31 +149,14 @@ contract PENScriptedDeploymentTest is Test, PENDeploymentHelper {
         vm.stopPrank();
     }
 
-    function _castVote(
-        PENRankedChoiceStrategy strategy_,
-        address voter_,
-        uint16[] memory ranking_
-    ) internal {
+    function _castYes(PENStrategyV1 strategy_, address voter_) internal {
         vm.prank(voter_);
-        strategy_.castVote(PROPOSAL_ID, 1, _voteData(ranking_), 0);
+        strategy_.castVote(PROPOSAL_ID, uint8(IStrategyV1.VoteType.YES), _voteData(), 0);
     }
 
-    function _voteData(
-        uint16[] memory ranking_
-    ) internal pure returns (IVotingTypes.VotingConfigVoteData[] memory votingConfigsData_) {
+    function _voteData() internal pure returns (IVotingTypes.VotingConfigVoteData[] memory votingConfigsData_) {
         votingConfigsData_ = new IVotingTypes.VotingConfigVoteData[](1);
-        votingConfigsData_[0] = IVotingTypes.VotingConfigVoteData({configIndex: 0, voteData: abi.encode(ranking_)});
-    }
-
-    function _ranking(
-        uint16 first_,
-        uint16 second_,
-        uint16 third_
-    ) internal pure returns (uint16[] memory ranking_) {
-        ranking_ = new uint16[](3);
-        ranking_[0] = first_;
-        ranking_[1] = second_;
-        ranking_[2] = third_;
+        votingConfigsData_[0] = IVotingTypes.VotingConfigVoteData({configIndex: 0, voteData: ""});
     }
 
     function _singleUintArray(uint256 value_) internal pure returns (uint256[] memory values_) {

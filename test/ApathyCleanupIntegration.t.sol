@@ -10,11 +10,12 @@ import {Enum} from "@gnosis.pm/safe-contracts/contracts/common/Enum.sol";
 import {SeatToken} from "../src/SeatToken.sol";
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
-import {PENRankedChoiceStrategy} from "../src/governance/PENRankedChoiceStrategy.sol";
+import {PENStrategyV1} from "../src/governance/PENStrategyV1.sol";
 
 import {Transaction} from "decent-contracts/contracts/interfaces/decent/Module.sol";
 import {IVotingTypes} from "decent-contracts/contracts/interfaces/decent/deployables/IVotingTypes.sol";
 import {IModuleAzoriusV1} from "decent-contracts/contracts/interfaces/decent/deployables/IModuleAzoriusV1.sol";
+import {IStrategyV1} from "decent-contracts/contracts/interfaces/decent/deployables/IStrategyV1.sol";
 import {ModuleAzoriusV1} from "decent-contracts/contracts/deployables/modules/ModuleAzoriusV1.sol";
 import {VotingWeightERC20V1} from "decent-contracts/contracts/deployables/strategies/voting-weight/VotingWeightERC20V1.sol";
 import {VoteTrackerERC20V1} from "decent-contracts/contracts/deployables/strategies/vote-trackers/VoteTrackerERC20V1.sol";
@@ -22,8 +23,6 @@ import {ProposerAdapterERC20V1} from "decent-contracts/contracts/deployables/str
 import {MockAvatar} from "decent-contracts/contracts/mocks/MockAvatar.sol";
 
 contract ApathyCleanupIntegrationTest is Test {
-    uint32 internal constant INITIAL_PROPOSAL_ID = 0;
-    uint32 internal constant CLEANUP_PROPOSAL_ID = 1;
     uint32 internal constant VOTING_PERIOD = 3 days;
     uint32 internal constant TIMELOCK_PERIOD = 1 days;
     uint32 internal constant EXECUTION_PERIOD = 2 days;
@@ -40,7 +39,7 @@ contract ApathyCleanupIntegrationTest is Test {
     ERC20Mock internal asset;
     PrincipalManager internal principalManager;
     BondingTranche internal bondingTranche;
-    PENRankedChoiceStrategy internal strategy;
+    PENStrategyV1 internal strategy;
     ModuleAzoriusV1 internal azorius;
     VotingWeightERC20V1 internal votingWeight;
     VoteTrackerERC20V1 internal voteTracker;
@@ -81,9 +80,7 @@ contract ApathyCleanupIntegrationTest is Test {
             address(avatar),
             address(0),
             100,
-            IERC4626(address(0)),
-            IERC4626(address(0)),
-            address(0)
+            IERC4626(address(0))
         );
 
         uint256[] memory upperBounds = new uint256[](1);
@@ -118,12 +115,7 @@ contract ApathyCleanupIntegrationTest is Test {
         assertEq(seatToken.totalSupply(), TOTAL_SEATS);
 
         vm.warp(block.timestamp + 40 days);
-        _submitProposalAndVote(
-            INITIAL_PROPOSAL_ID,
-            150,
-            members[0],
-            _ranking(1, 0)
-        );
+        _submitProposalAndVote(150, members[0]);
 
         uint48 activeMemberTimestamp = seatToken.lastActivityAt(members[0]);
         assertEq(activeMemberTimestamp, block.timestamp);
@@ -146,32 +138,26 @@ contract ApathyCleanupIntegrationTest is Test {
         assertEq(seatToken.balanceOf(members[0]), MEMBER_SEATS);
         assertEq(seatToken.getVotes(members[0]), MEMBER_SEATS);
 
-        _submitProposalAndVote(
-            CLEANUP_PROPOSAL_ID,
-            250,
-            members[0],
-            _ranking(1, 0)
-        );
+        uint32 proposalId = _submitProposalAndVote(250, members[0]);
 
-        assertEq(uint8(azorius.proposalState(CLEANUP_PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.ACTIVE));
-        assertTrue(strategy.isQuorumMet(CLEANUP_PROPOSAL_ID));
+        assertEq(uint8(azorius.proposalState(proposalId)), uint8(IModuleAzoriusV1.ProposalState.ACTIVE));
+        assertTrue(strategy.isQuorumMet(proposalId));
 
-        _advanceToExecutable(CLEANUP_PROPOSAL_ID);
-        assertTrue(strategy.isPassed(CLEANUP_PROPOSAL_ID));
+        _advanceToExecutable(proposalId);
+        assertTrue(strategy.isPassed(proposalId));
 
         Transaction[] memory transactions = _setReserveTransactions(250);
-        azorius.executeProposal(CLEANUP_PROPOSAL_ID, transactions);
+        azorius.executeProposal(proposalId, transactions);
 
         assertEq(principalManager.liquidReserveTarget(), 250);
-        assertEq(uint8(azorius.proposalState(CLEANUP_PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.EXECUTED));
+        assertEq(uint8(azorius.proposalState(proposalId)), uint8(IModuleAzoriusV1.ProposalState.EXECUTED));
     }
 
     function _submitProposalAndVote(
-        uint32 proposalId_,
         uint256 newReserveTarget_,
-        address proposer_,
-        uint16[] memory ranking_
-    ) internal {
+        address proposer_
+    ) internal returns (uint32 proposalId_) {
+        proposalId_ = uint32(azorius.totalProposalCount());
         Transaction[] memory transactions = _setReserveTransactions(newReserveTarget_);
 
         vm.prank(proposer_);
@@ -182,12 +168,8 @@ contract ApathyCleanupIntegrationTest is Test {
             ""
         );
 
-        vm.prank(proposer_);
-        strategy.submitSlate(proposalId_, 1);
-
         vm.warp(block.timestamp + 1);
-        vm.prank(proposer_);
-        strategy.castVote(proposalId_, 1, _voteData(ranking_), 0);
+        _castYes(proposalId_, proposer_);
     }
 
     function _setReserveTransactions(uint256 newReserveTarget_) internal view returns (Transaction[] memory transactions) {
@@ -208,9 +190,9 @@ contract ApathyCleanupIntegrationTest is Test {
         assertEq(uint8(azorius.proposalState(proposalId_)), uint8(IModuleAzoriusV1.ProposalState.EXECUTABLE));
     }
 
-    function _deployStrategy() internal returns (PENRankedChoiceStrategy deployed) {
-        PENRankedChoiceStrategy implementation = new PENRankedChoiceStrategy();
-        deployed = PENRankedChoiceStrategy(Clones.clone(address(implementation)));
+    function _deployStrategy() internal returns (PENStrategyV1 deployed) {
+        PENStrategyV1 implementation = new PENStrategyV1();
+        deployed = PENStrategyV1(Clones.clone(address(implementation)));
     }
 
     function _deployVotingWeight() internal returns (VotingWeightERC20V1 deployed) {
@@ -244,14 +226,14 @@ contract ApathyCleanupIntegrationTest is Test {
         );
     }
 
-    function _voteData(
-        uint16[] memory ranking_
-    ) internal pure returns (IVotingTypes.VotingConfigVoteData[] memory votingConfigsData) {
+    function _castYes(uint32 proposalId_, address voter_) internal {
+        vm.prank(voter_);
+        strategy.castVote(proposalId_, uint8(IStrategyV1.VoteType.YES), _voteData(), 0);
+    }
+
+    function _voteData() internal pure returns (IVotingTypes.VotingConfigVoteData[] memory votingConfigsData) {
         votingConfigsData = new IVotingTypes.VotingConfigVoteData[](1);
-        votingConfigsData[0] = IVotingTypes.VotingConfigVoteData({
-            configIndex: 0,
-            voteData: abi.encode(ranking_)
-        });
+        votingConfigsData[0] = IVotingTypes.VotingConfigVoteData({configIndex: 0, voteData: ""});
     }
 
     function _singleAddress(address item_) internal pure returns (address[] memory items) {
@@ -271,9 +253,4 @@ contract ApathyCleanupIntegrationTest is Test {
         });
     }
 
-    function _ranking(uint16 first, uint16 second) internal pure returns (uint16[] memory ranking) {
-        ranking = new uint16[](2);
-        ranking[0] = first;
-        ranking[1] = second;
-    }
 }
