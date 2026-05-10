@@ -309,6 +309,14 @@ abstract contract PENDeploymentHelper {
 }
 
 abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
+    error InsufficientDeployerBalance(uint256 requiredWei, uint256 availableWei);
+
+    /// @dev Default 1.2x gas buffer. Covers per-tx overhead (forge script broadcasts each `new Contract()` and
+    ///      role-management call as a separate transaction; each adds ~21k base gas + calldata cost). Override
+    ///      via env `GAS_BUFFER_BPS` (e.g. 15000 = 1.5x).
+    uint256 internal constant _DEFAULT_GAS_BUFFER_BPS = 12_000;
+    uint256 internal constant _BPS_DENOMINATOR = 10_000;
+
     function _loadConfig() internal view returns (DeploymentConfig memory config) {
         config.core = CoreConfig({
             seatName: vm.envString("SEAT_TOKEN_NAME"),
@@ -393,6 +401,65 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
             return parsed;
         } catch {
             return address(0);
+        }
+    }
+
+    /// @notice Reverts with a clear error if `deployer_` cannot cover the deployment.
+    /// @dev Estimates gas by simulating the full deployment from the script's own context (constructor work
+    ///      is independent of the caller, so the gas reading is representative). Multiplies by a buffered
+    ///      gas price and compares with the deployer's balance.
+    function _checkDeployerFunds(address deployer_, bytes32 salt_, DeploymentConfig memory config_)
+        internal
+        returns (uint256 estimatedGas, uint256 requiredWei)
+    {
+        estimatedGas = _estimateDeploymentGas(salt_, config_);
+
+        uint256 bufferBps = _resolveGasBufferBps();
+        uint256 bufferedGas = (estimatedGas * bufferBps) / _BPS_DENOMINATOR;
+        uint256 gasPrice = _resolveGasPrice();
+        requiredWei = bufferedGas * gasPrice;
+        uint256 availableWei = deployer_.balance;
+
+        console2.log("Estimated gas (raw):", estimatedGas);
+        console2.log("Estimated gas (buffered):", bufferedGas);
+        console2.log("Gas price (wei):", gasPrice);
+        console2.log("Required (wei):", requiredWei);
+        console2.log("Deployer balance (wei):", availableWei);
+
+        if (availableWei < requiredWei) revert InsufficientDeployerBalance(requiredWei, availableWei);
+    }
+
+    function _estimateDeploymentGas(bytes32 salt_, DeploymentConfig memory config_) internal returns (uint256 gasUsed) {
+        // Run a dry simulation from a deterministic synthetic deployer. Constructor work is independent
+        // of the caller, so the gas reading is representative of the real deployment.
+        uint256 simulatedKey = uint256(keccak256("PEN_GAS_PREVIEW"));
+        address simulatedDeployer = vm.addr(simulatedKey);
+        uint256 simulatedNonce = vm.getNonce(simulatedDeployer);
+        DeploymentAddresses memory expected = previewDeployment(simulatedDeployer, simulatedNonce, salt_, config_);
+
+        vm.startBroadcast(simulatedKey);
+        uint256 gasBefore = gasleft();
+        _deploySystem(expected, salt_, config_, simulatedDeployer);
+        unchecked {
+            gasUsed = gasBefore - gasleft();
+        }
+        vm.stopBroadcast();
+    }
+
+    function _resolveGasPrice() internal view returns (uint256 gasPrice) {
+        try vm.envUint("GAS_PRICE_WEI") returns (uint256 envPrice) {
+            return envPrice;
+        } catch {
+            gasPrice = tx.gasprice;
+            if (gasPrice == 0) gasPrice = block.basefee;
+        }
+    }
+
+    function _resolveGasBufferBps() internal view returns (uint256) {
+        try vm.envUint("GAS_BUFFER_BPS") returns (uint256 envBps) {
+            return envBps;
+        } catch {
+            return _DEFAULT_GAS_BUFFER_BPS;
         }
     }
 }
