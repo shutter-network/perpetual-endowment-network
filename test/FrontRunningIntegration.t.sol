@@ -70,11 +70,7 @@ contract FrontRunningIntegrationTest is Test {
 
         vm.prank(bob);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                BondingTranche.PurchaseCostExceedsLimit.selector,
-                bobActualCost,
-                bobQuotedCost
-            )
+            abi.encodeWithSelector(BondingTranche.PurchaseCostExceedsLimit.selector, bobActualCost, bobQuotedCost)
         );
         bondingTranche.purchase(bob, 100, bobQuotedCost);
 

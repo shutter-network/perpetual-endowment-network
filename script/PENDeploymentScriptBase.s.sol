@@ -17,9 +17,15 @@ import {PENSafeBootstrap} from "../src/deployment/PENSafeBootstrap.sol";
 
 import {IVotingTypes} from "decent-contracts/contracts/interfaces/decent/deployables/IVotingTypes.sol";
 import {ModuleAzoriusV1} from "decent-contracts/contracts/deployables/modules/ModuleAzoriusV1.sol";
-import {ProposerAdapterERC20V1} from "decent-contracts/contracts/deployables/strategies/proposer-adapters/ProposerAdapterERC20V1.sol";
-import {VoteTrackerERC20V1} from "decent-contracts/contracts/deployables/strategies/vote-trackers/VoteTrackerERC20V1.sol";
-import {VotingWeightERC20V1} from "decent-contracts/contracts/deployables/strategies/voting-weight/VotingWeightERC20V1.sol";
+import {
+    ProposerAdapterERC20V1
+} from "decent-contracts/contracts/deployables/strategies/proposer-adapters/ProposerAdapterERC20V1.sol";
+import {
+    VoteTrackerERC20V1
+} from "decent-contracts/contracts/deployables/strategies/vote-trackers/VoteTrackerERC20V1.sol";
+import {
+    VotingWeightERC20V1
+} from "decent-contracts/contracts/deployables/strategies/voting-weight/VotingWeightERC20V1.sol";
 import {Safe} from "@gnosis.pm/safe-contracts/contracts/Safe.sol";
 import {SafeProxy} from "@gnosis.pm/safe-contracts/contracts/proxies/SafeProxy.sol";
 import {SafeProxyFactory} from "@gnosis.pm/safe-contracts/contracts/proxies/SafeProxyFactory.sol";
@@ -120,16 +126,12 @@ abstract contract PENDeploymentHelper {
             deployed_.azorius
         ) = _deployGovernanceClones(expected_);
 
-        (
-            deployed_.seatToken,
-            deployed_.principalManager,
-            deployed_.bondingTranche
-        ) = _deployCoreContracts(expected_, config_, bootstrapAuthority_);
+        (deployed_.seatToken, deployed_.principalManager, deployed_.bondingTranche) =
+            _deployCoreContracts(expected_, config_, bootstrapAuthority_);
 
         deployed_.safe = address(
-            SafeProxyFactory(deployed_.safeProxyFactory).createProxyWithNonce(
-                deployed_.safeSingleton, _safeInitializer(expected_), uint256(salt_)
-            )
+            SafeProxyFactory(deployed_.safeProxyFactory)
+                .createProxyWithNonce(deployed_.safeSingleton, _safeInitializer(expected_), uint256(salt_))
         );
         _assertDeployedAddress("SAFE", expected_.safe, deployed_.safe);
 
@@ -139,9 +141,7 @@ abstract contract PENDeploymentHelper {
         return expected_;
     }
 
-    function _deployGovernanceClones(
-        DeploymentAddresses memory expected_
-    )
+    function _deployGovernanceClones(DeploymentAddresses memory expected_)
         internal
         returns (
             address strategy_,
@@ -177,14 +177,7 @@ abstract contract PENDeploymentHelper {
         DeploymentAddresses memory expected_,
         DeploymentConfig memory config_,
         address bootstrapAuthority_
-    )
-        internal
-        returns (
-            address seatToken_,
-            address principalManager_,
-            address bondingTranche_
-        )
-    {
+    ) internal returns (address seatToken_, address principalManager_, address bondingTranche_) {
         seatToken_ = address(
             new SeatToken(
                 config_.core.seatName,
@@ -224,40 +217,37 @@ abstract contract PENDeploymentHelper {
         _assertDeployedAddress("BONDING_TRANCHE", expected_.bondingTranche, bondingTranche_);
     }
 
-    function _initializeGovernance(
-        DeploymentAddresses memory deployed_,
-        DeploymentConfig memory config_
-    ) internal {
-        ProposerAdapterERC20V1(deployed_.proposerAdapter).initialize(
-            deployed_.seatToken, config_.governance.proposerThreshold
-        );
+    function _initializeGovernance(DeploymentAddresses memory deployed_, DeploymentConfig memory config_) internal {
+        ProposerAdapterERC20V1(deployed_.proposerAdapter)
+            .initialize(deployed_.seatToken, config_.governance.proposerThreshold);
 
         address[] memory proposerAdapters = new address[](1);
         proposerAdapters[0] = deployed_.proposerAdapter;
-        PENStrategyV1(deployed_.strategy).initialize(
-            config_.governance.votingPeriod,
-            config_.governance.quorumThreshold,
-            config_.governance.basisNumerator,
-            proposerAdapters,
-            config_.governance.lightAccountFactory
-        );
+        PENStrategyV1(deployed_.strategy)
+            .initialize(
+                config_.governance.votingPeriod,
+                config_.governance.quorumThreshold,
+                config_.governance.basisNumerator,
+                proposerAdapters,
+                config_.governance.lightAccountFactory
+            );
 
-        VotingWeightERC20V1(deployed_.votingWeight).initialize(
-            deployed_.seatToken, config_.governance.votingWeightPerToken
-        );
+        VotingWeightERC20V1(deployed_.votingWeight)
+            .initialize(deployed_.seatToken, config_.governance.votingWeightPerToken);
 
         address[] memory authorizedCallers = new address[](1);
         authorizedCallers[0] = deployed_.strategy;
         VoteTrackerERC20V1(deployed_.voteTracker).initialize(authorizedCallers);
 
-        ModuleAzoriusV1(deployed_.azorius).initialize(
-            deployed_.safe,
-            deployed_.safe,
-            deployed_.safe,
-            deployed_.strategy,
-            config_.governance.timelockPeriod,
-            config_.governance.executionPeriod
-        );
+        ModuleAzoriusV1(deployed_.azorius)
+            .initialize(
+                deployed_.safe,
+                deployed_.safe,
+                deployed_.safe,
+                deployed_.strategy,
+                config_.governance.timelockPeriod,
+                config_.governance.executionPeriod
+            );
 
         IVotingTypes.VotingConfig[] memory votingConfigs = new IVotingTypes.VotingConfig[](1);
         votingConfigs[0] =
@@ -265,10 +255,7 @@ abstract contract PENDeploymentHelper {
         PENStrategyV1(deployed_.strategy).initialize2(deployed_.azorius, votingConfigs);
     }
 
-    function _finalizeAccess(
-        DeploymentAddresses memory deployed_,
-        address bootstrapAuthority_
-    ) internal {
+    function _finalizeAccess(DeploymentAddresses memory deployed_, address bootstrapAuthority_) internal {
         SeatToken seatToken = SeatToken(deployed_.seatToken);
         PrincipalManager principalManager = PrincipalManager(deployed_.principalManager);
         BondingTranche bondingTranche = BondingTranche(deployed_.bondingTranche);
@@ -300,10 +287,7 @@ abstract contract PENDeploymentHelper {
         );
     }
 
-    function _predictSafeAddress(
-        DeploymentAddresses memory predicted_,
-        bytes32 salt_
-    ) internal pure returns (address) {
+    function _predictSafeAddress(DeploymentAddresses memory predicted_, bytes32 salt_) internal pure returns (address) {
         bytes memory initializer = _safeInitializer(predicted_);
         bytes32 proxySalt = keccak256(abi.encodePacked(keccak256(initializer), uint256(salt_)));
         bytes32 proxyInitCodeHash =

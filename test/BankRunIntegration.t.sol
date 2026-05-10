@@ -102,9 +102,7 @@ contract BankRunIntegrationTest is Test {
         principalVault.setWithdrawalLimit(4e6);
 
         vm.prank(holders[2]);
-        vm.expectRevert(
-            abi.encodeWithSelector(PrincipalManager.InsufficientLiquidity.selector, REFUND_PRICE, 4e6)
-        );
+        vm.expectRevert(abi.encodeWithSelector(PrincipalManager.InsufficientLiquidity.selector, REFUND_PRICE, 4e6));
         bondingTranche.refund(1, holders[2]);
 
         assertEq(seatToken.balanceOf(holders[2]), 1);
@@ -115,12 +113,10 @@ contract BankRunIntegrationTest is Test {
         assertEq(principalManager.accountedPrincipal(), 90e6);
     }
 
-    function test_BankRunRevertsGracefullyWhenRefundExceedsAccountedPrincipal() public {
+    function test_BankRunRevertsGracefullyWhenRefundObligationExceedsManagedAssets() public {
         MockUSDC usdc = new MockUSDC();
-        SeatToken seatToken =
-            new SeatToken("PEN Seat", "SEAT", 3, 365 days, admin, address(0), address(0), address(0));
-        PrincipalManager principalManager =
-            new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)));
+        SeatToken seatToken = new SeatToken("PEN Seat", "SEAT", 3, 365 days, admin, address(0), address(0), address(0));
+        PrincipalManager principalManager = new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)));
 
         uint256[] memory upperBounds = new uint256[](1);
         uint256[] memory prices = new uint256[](1);
@@ -145,22 +141,17 @@ contract BankRunIntegrationTest is Test {
             vm.stopPrank();
         }
 
+        // With purchasePrice (1e6) < refundPrice (2e6), the system can never cover all seats:
+        // obligation = 3 * 2e6 = 6e6, managedAssets = 3 * 1e6 = 3e6.
+        // BondingTranche.refund must revert before any seat is burned.
         vm.prank(holders[0]);
+        vm.expectRevert(abi.encodeWithSelector(BondingTranche.RefundObligationExceedsManagedAssets.selector, 6e6, 3e6));
         bondingTranche.refund(1, holders[0]);
 
-        assertEq(principalManager.accountedPrincipal(), 1e6);
-        assertEq(seatToken.balanceOf(holders[1]), 1);
-
-        vm.prank(holders[1]);
-        vm.expectRevert(
-            abi.encodeWithSelector(PrincipalManager.PrincipalUnderflow.selector, 1e6, 2e6)
-        );
-        bondingTranche.refund(1, holders[1]);
-
-        assertEq(seatToken.balanceOf(holders[1]), 1);
-        assertEq(usdc.balanceOf(holders[1]), 0);
-        assertEq(principalManager.accountedPrincipal(), 1e6);
-        assertEq(principalManager.totalManagedAssets(), 1e6);
+        assertEq(seatToken.balanceOf(holders[0]), 1);
+        assertEq(usdc.balanceOf(holders[0]), 0);
+        assertEq(principalManager.accountedPrincipal(), 3e6);
+        assertEq(principalManager.totalManagedAssets(), 3e6);
     }
 
     function _deployBankRunSystem()
@@ -174,10 +165,9 @@ contract BankRunIntegrationTest is Test {
         )
     {
         usdc = new MockUSDC();
-        seatToken = new SeatToken("PEN Seat", "SEAT", TOTAL_PURCHASES, 365 days, admin, address(0), address(0), address(0));
-        principalManager = new PrincipalManager(
-            usdc, admin, address(0), RESERVE_TARGET, IERC4626(address(0))
-        );
+        seatToken =
+            new SeatToken("PEN Seat", "SEAT", TOTAL_PURCHASES, 365 days, admin, address(0), address(0), address(0));
+        principalManager = new PrincipalManager(usdc, admin, address(0), RESERVE_TARGET, IERC4626(address(0)));
         principalVault = new ERC4626Mock(address(usdc));
 
         uint256[] memory upperBounds = new uint256[](1);
@@ -216,10 +206,9 @@ contract BankRunIntegrationTest is Test {
         )
     {
         usdc = new MockUSDC();
-        seatToken = new SeatToken("PEN Seat", "SEAT", TOTAL_PURCHASES, 365 days, admin, address(0), address(0), address(0));
-        principalManager = new PrincipalManager(
-            usdc, admin, address(0), RESERVE_TARGET, IERC4626(address(0))
-        );
+        seatToken =
+            new SeatToken("PEN Seat", "SEAT", TOTAL_PURCHASES, 365 days, admin, address(0), address(0), address(0));
+        principalManager = new PrincipalManager(usdc, admin, address(0), RESERVE_TARGET, IERC4626(address(0)));
         principalVault = new LimitedWithdrawalVault(address(usdc));
 
         uint256[] memory upperBounds = new uint256[](1);

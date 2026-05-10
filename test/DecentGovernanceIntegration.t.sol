@@ -16,9 +16,15 @@ import {IVotingTypes} from "decent-contracts/contracts/interfaces/decent/deploya
 import {IModuleAzoriusV1} from "decent-contracts/contracts/interfaces/decent/deployables/IModuleAzoriusV1.sol";
 import {IStrategyV1} from "decent-contracts/contracts/interfaces/decent/deployables/IStrategyV1.sol";
 import {ModuleAzoriusV1} from "decent-contracts/contracts/deployables/modules/ModuleAzoriusV1.sol";
-import {VotingWeightERC20V1} from "decent-contracts/contracts/deployables/strategies/voting-weight/VotingWeightERC20V1.sol";
-import {VoteTrackerERC20V1} from "decent-contracts/contracts/deployables/strategies/vote-trackers/VoteTrackerERC20V1.sol";
-import {ProposerAdapterERC20V1} from "decent-contracts/contracts/deployables/strategies/proposer-adapters/ProposerAdapterERC20V1.sol";
+import {
+    VotingWeightERC20V1
+} from "decent-contracts/contracts/deployables/strategies/voting-weight/VotingWeightERC20V1.sol";
+import {
+    VoteTrackerERC20V1
+} from "decent-contracts/contracts/deployables/strategies/vote-trackers/VoteTrackerERC20V1.sol";
+import {
+    ProposerAdapterERC20V1
+} from "decent-contracts/contracts/deployables/strategies/proposer-adapters/ProposerAdapterERC20V1.sol";
 import {MockAvatar} from "decent-contracts/contracts/mocks/MockAvatar.sol";
 
 contract DecentGovernanceIntegrationTest is Test {
@@ -44,14 +50,7 @@ contract DecentGovernanceIntegrationTest is Test {
 
     function setUp() public {
         seatToken = new SeatToken(
-            "PEN Seat",
-            "SEAT",
-            10_000_000,
-            365 days,
-            address(this),
-            address(this),
-            address(this),
-            address(0)
+            "PEN Seat", "SEAT", 10_000_000, 365 days, address(this), address(this), address(this), address(0)
         );
 
         seatToken.mint(alice, 4);
@@ -63,13 +62,7 @@ contract DecentGovernanceIntegrationTest is Test {
 
         avatar = new MockAvatar();
         asset = new ERC20Mock();
-        principalManager = new PrincipalManager(
-            asset,
-            address(avatar),
-            address(0),
-            100,
-            IERC4626(address(0))
-        );
+        principalManager = new PrincipalManager(asset, address(avatar), address(0), 100, IERC4626(address(0)));
 
         strategy = _deployStrategy();
         seatToken.grantRole(seatToken.ACTIVITY_ROLE(), address(strategy));
@@ -80,13 +73,7 @@ contract DecentGovernanceIntegrationTest is Test {
 
         avatar.enableModule(address(azorius));
 
-        strategy.initialize(
-            VOTING_PERIOD,
-            6,
-            500_001,
-            _singleAddress(address(proposerAdapter)),
-            address(0)
-        );
+        strategy.initialize(VOTING_PERIOD, 6, 500_001, _singleAddress(address(proposerAdapter)), address(0));
         strategy.initialize2(address(azorius), _singleVotingConfig());
     }
 
@@ -102,12 +89,7 @@ contract DecentGovernanceIntegrationTest is Test {
         });
 
         vm.prank(alice);
-        azorius.submitProposal(
-            transactions,
-            "ipfs://pen-proposal/liquid-reserve-update",
-            address(proposerAdapter),
-            ""
-        );
+        azorius.submitProposal(transactions, "ipfs://pen-proposal/liquid-reserve-update", address(proposerAdapter), "");
 
         assertEq(azorius.totalProposalCount(), 1);
         assertEq(uint8(azorius.proposalState(PROPOSAL_ID)), uint8(IModuleAzoriusV1.ProposalState.ACTIVE));
@@ -158,12 +140,7 @@ contract DecentGovernanceIntegrationTest is Test {
         ModuleAzoriusV1 implementation = new ModuleAzoriusV1();
         deployed = ModuleAzoriusV1(Clones.clone(address(implementation)));
         deployed.initialize(
-            address(this),
-            address(avatar),
-            address(avatar),
-            address(strategy),
-            TIMELOCK_PERIOD,
-            EXECUTION_PERIOD
+            address(this), address(avatar), address(avatar), address(strategy), TIMELOCK_PERIOD, EXECUTION_PERIOD
         );
     }
 
@@ -174,10 +151,7 @@ contract DecentGovernanceIntegrationTest is Test {
 
     function _voteData() internal pure returns (IVotingTypes.VotingConfigVoteData[] memory votingConfigsData) {
         votingConfigsData = new IVotingTypes.VotingConfigVoteData[](1);
-        votingConfigsData[0] = IVotingTypes.VotingConfigVoteData({
-            configIndex: 0,
-            voteData: ""
-        });
+        votingConfigsData[0] = IVotingTypes.VotingConfigVoteData({configIndex: 0, voteData: ""});
     }
 
     function _singleAddress(address item) internal pure returns (address[] memory items) {
@@ -185,16 +159,9 @@ contract DecentGovernanceIntegrationTest is Test {
         items[0] = item;
     }
 
-    function _singleVotingConfig()
-        internal
-        view
-        returns (IVotingTypes.VotingConfig[] memory votingConfigs)
-    {
+    function _singleVotingConfig() internal view returns (IVotingTypes.VotingConfig[] memory votingConfigs) {
         votingConfigs = new IVotingTypes.VotingConfig[](1);
-        votingConfigs[0] = IVotingTypes.VotingConfig({
-            votingWeight: address(votingWeight),
-            voteTracker: address(voteTracker)
-        });
+        votingConfigs[0] =
+            IVotingTypes.VotingConfig({votingWeight: address(votingWeight), voteTracker: address(voteTracker)});
     }
-
 }

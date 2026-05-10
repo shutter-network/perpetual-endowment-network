@@ -136,8 +136,8 @@ Where:
 
 For each appended tranche:
 
-- `price != 0`
 - `upperBound` must be **strictly greater** than the previous final upper bound
+- `price` must be **strictly greater** than the previous final price (a tranche that repeats the previous price is redundant — just widen the previous tranche instead)
 - `upperBound` must be **strictly greater** than the current `SeatToken.totalSupply()` (extensions must actually extend sales)
 - `upperBound` must be **<= `SeatToken.supplyCap()`**
 

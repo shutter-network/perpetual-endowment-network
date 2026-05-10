@@ -6,8 +6,8 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 
-import {PrincipalManager} from "./PrincipalManager.sol";
-import {SeatToken} from "./SeatToken.sol";
+import {IPrincipalManager} from "./interfaces/IPrincipalManager.sol";
+import {ISeatToken} from "./interfaces/ISeatToken.sol";
 
 contract BondingTranche is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -22,10 +22,11 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     error InvalidRefundReceiver(address receiver);
     error InvalidTrancheConfiguration();
     error PurchaseCostExceedsLimit(uint256 cost, uint256 maxCost);
-    error SoldOut();
+    error InsufficientSeatsAvailable(uint256 requested, uint256 available);
+    error RefundObligationExceedsManagedAssets(uint256 obligation, uint256 managedAssets);
 
-    SeatToken public immutable seatToken;
-    PrincipalManager public immutable principalManager;
+    ISeatToken public immutable seatToken;
+    IPrincipalManager public immutable principalManager;
     IERC20 public immutable asset;
     uint256 public immutable refundPrice;
 
@@ -43,8 +44,8 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     event SeatsReclaimed(address indexed holder, uint256 seats, uint256 newTotalSupply);
 
     constructor(
-        SeatToken seatToken_,
-        PrincipalManager principalManager_,
+        ISeatToken seatToken_,
+        IPrincipalManager principalManager_,
         uint256 refundPrice_,
         address admin_,
         address reclaimer_,
@@ -59,6 +60,10 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
             revert InvalidTrancheConfiguration();
         }
 
+        // Both `upperBound` and `price` must be strictly increasing across tranches:
+        // - first values must be > 0 (initial `previousUpperBound` and `previousPrice` are 0),
+        // - each subsequent value must exceed the previous.
+        // A tranche that repeats the previous price is redundant (just widen the previous tranche).
         uint256 previousUpperBound;
         uint256 previousPrice;
         uint256 length = trancheUpperBounds_.length;
@@ -66,8 +71,8 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
             uint256 upperBound = trancheUpperBounds_[i];
             uint256 price = tranchePrices_[i];
 
-            if (upperBound <= previousUpperBound || price == 0) revert InvalidTrancheConfiguration();
-            if (i != 0 && price < previousPrice) revert InvalidTrancheConfiguration();
+            if (upperBound <= previousUpperBound || price <= previousPrice) revert InvalidTrancheConfiguration();
+
             previousUpperBound = upperBound;
             previousPrice = price;
         }
@@ -98,7 +103,10 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     }
 
     /// @notice Append new tranche(s) to extend the sale cap (governance-controlled).
-    /// @dev The new upper bounds must be strictly increasing and <= SeatToken's supply cap.
+    /// @dev Both `newUpperBounds` and `newPrices` must be strictly greater than the previous
+    ///      tranche's values (and strictly increasing across the appended tranches).
+    ///      Each `upperBound` must also exceed the current `SeatToken.totalSupply()` and stay
+    ///      within `SeatToken.supplyCap()`.
     function extendTranches(uint256[] calldata newUpperBounds, uint256[] calldata newPrices)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
@@ -109,16 +117,13 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
 
         uint256 previousUpperBound = _trancheUpperBounds[_trancheUpperBounds.length - 1];
         uint256 previousPrice = _tranchePrices[_tranchePrices.length - 1];
-        uint256 currentSupply = seatToken.totalSupply();
+        uint256 currentSupply = IERC20(address(seatToken)).totalSupply();
 
         for (uint256 i; i < length; ++i) {
             uint256 upperBound = newUpperBounds[i];
             uint256 price = newPrices[i];
 
-            if (price == 0) revert InvalidTrancheConfiguration();
-            if (price < previousPrice) revert InvalidTrancheConfiguration();
-            if (upperBound <= previousUpperBound) revert InvalidTrancheConfiguration();
-            if (upperBound <= currentSupply) revert InvalidTrancheConfiguration();
+            if (upperBound <= previousUpperBound || price <= previousPrice) revert InvalidTrancheConfiguration();
             if (upperBound > seatToken.supplyCap()) revert InvalidTrancheConfiguration();
 
             _trancheUpperBounds.push(upperBound);
@@ -133,29 +138,34 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     function quotePurchase(uint256 amount) public view returns (uint256 totalCost) {
         if (amount == 0) revert InvalidAmount();
 
-        uint256 remaining = amount;
-        uint256 currentSupply = seatToken.totalSupply();
+        uint256 currentSupply = IERC20(address(seatToken)).totalSupply();
         uint256 length = _trancheUpperBounds.length;
 
-        for (uint256 i; i < length; ++i) {
-            uint256 upperBound = _trancheUpperBounds[i];
-            if (currentSupply >= upperBound) {
-                continue;
-            }
+        // Locate the active tranche: the first one whose upper bound has not yet been reached.
+        uint256 start;
+        while (start < length && currentSupply >= _trancheUpperBounds[start]) {
+            ++start;
+        }
+        if (start == length) revert InsufficientSeatsAvailable(amount, 0);
 
-            uint256 availableInTranche = upperBound - currentSupply;
+        // Fill from the active tranche onward. The active tranche fills from `currentSupply`;
+        // every subsequent tranche fills from the previous tranche's upper bound.
+        uint256 remaining = amount;
+        uint256 trancheFloor = currentSupply;
+        for (uint256 i = start; i < length; ++i) {
+            uint256 upperBound = _trancheUpperBounds[i];
+            uint256 availableInTranche = upperBound - trancheFloor;
             uint256 seatsAtThisPrice = remaining < availableInTranche ? remaining : availableInTranche;
 
             totalCost += seatsAtThisPrice * _tranchePrices[i];
-            currentSupply += seatsAtThisPrice;
             remaining -= seatsAtThisPrice;
 
-            if (remaining == 0) {
-                return totalCost;
-            }
+            if (remaining == 0) return totalCost;
+
+            trancheFloor = upperBound;
         }
 
-        revert SoldOut();
+        revert InsufficientSeatsAvailable(amount, amount - remaining);
     }
 
     function quoteRefund(uint256 amount) public view returns (uint256) {
@@ -181,32 +191,35 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
         principalManager.recordPurchase(totalCost);
         seatToken.mint(recipient, amount);
 
-        emit SeatsPurchased(msg.sender, recipient, amount, totalCost, seatToken.totalSupply());
+        emit SeatsPurchased(msg.sender, recipient, amount, totalCost, IERC20(address(seatToken)).totalSupply());
     }
 
-    function refund(uint256 amount, address receiver)
-        external
-        nonReentrant
-        returns (uint256 refundAmount)
-    {
+    function refund(uint256 amount, address receiver) external nonReentrant returns (uint256 refundAmount) {
         address refundReceiver = receiver == address(0) ? msg.sender : receiver;
         if (refundReceiver == address(0)) revert InvalidRefundReceiver(refundReceiver);
 
         refundAmount = quoteRefund(amount);
+
+        // Block refunds when managed assets can't cover the refund obligation across all outstanding seats.
+        // Pre-burn check: totalManagedAssets() must cover totalSupply * refundPrice.
+        uint256 obligation = IERC20(address(seatToken)).totalSupply() * refundPrice;
+        uint256 managedAssets = principalManager.totalManagedAssets();
+        if (managedAssets < obligation) revert RefundObligationExceedsManagedAssets(obligation, managedAssets);
+
         seatToken.burn(msg.sender, amount);
         principalManager.payRefund(refundReceiver, refundAmount);
 
-        emit SeatsRefunded(msg.sender, refundReceiver, amount, refundAmount, seatToken.totalSupply());
+        emit SeatsRefunded(msg.sender, refundReceiver, amount, refundAmount, IERC20(address(seatToken)).totalSupply());
     }
 
     function reclaim(address holder) external onlyRole(RECLAIMER_ROLE) nonReentrant returns (uint256 reclaimedSeats) {
         if (!seatToken.isInactive(holder)) revert HolderStillActive(holder);
 
-        reclaimedSeats = seatToken.balanceOf(holder);
+        reclaimedSeats = IERC20(address(seatToken)).balanceOf(holder);
         if (reclaimedSeats == 0) revert InvalidAmount();
 
         seatToken.burn(holder, reclaimedSeats);
-        emit SeatsReclaimed(holder, reclaimedSeats, seatToken.totalSupply());
+        emit SeatsReclaimed(holder, reclaimedSeats, IERC20(address(seatToken)).totalSupply());
     }
 
     function _grantOptionalRole(bytes32 role, address account) internal {

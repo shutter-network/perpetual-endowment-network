@@ -14,9 +14,11 @@ contract PrincipalUnderflowIntegrationTest is Test {
     uint256 internal constant SEAT_COUNT = 1_000;
     uint256 internal constant PURCHASE_PRICE_PER_SEAT = 5e6;
     uint256 internal constant REFUND_PRICE_PER_SEAT = 0.5e6;
-    uint256 internal constant ACCOUNTED_PRINCIPAL = 5_000e6;
-    uint256 internal constant VAULT_LOSS = 500e6;
-    uint256 internal constant EXPECTED_REFUND = 500e6;
+    uint256 internal constant ACCOUNTED_PRINCIPAL = SEAT_COUNT * PURCHASE_PRICE_PER_SEAT; // 5_000e6
+    uint256 internal constant REFUND_OBLIGATION = SEAT_COUNT * REFUND_PRICE_PER_SEAT; // 500e6
+    // Loss large enough to push managedAssets below the refund obligation.
+    uint256 internal constant VAULT_LOSS = 4_600e6;
+    uint256 internal constant EXPECTED_REFUND = SEAT_COUNT * REFUND_PRICE_PER_SEAT; // 500e6
 
     address internal admin = makeAddr("admin");
     address internal member = makeAddr("member");
@@ -39,8 +41,9 @@ contract PrincipalUnderflowIntegrationTest is Test {
         upperBounds[0] = SEAT_COUNT;
         prices[0] = PURCHASE_PRICE_PER_SEAT;
 
-        bondingTranche =
-            new BondingTranche(seatToken, principalManager, REFUND_PRICE_PER_SEAT, admin, address(0), upperBounds, prices);
+        bondingTranche = new BondingTranche(
+            seatToken, principalManager, REFUND_PRICE_PER_SEAT, admin, address(0), upperBounds, prices
+        );
 
         vm.startPrank(admin);
         seatToken.grantRole(seatToken.MINTER_ROLE(), address(bondingTranche));
@@ -57,7 +60,7 @@ contract PrincipalUnderflowIntegrationTest is Test {
         vm.stopPrank();
     }
 
-    function test_RefundRevertsWhenVaultLossPushesManagedAssetsBelowAccountedPrincipal() public {
+    function test_RefundRevertsWhenVaultLossPushesManagedAssetsBelowRefundObligation() public {
         assertEq(principalManager.accountedPrincipal(), ACCOUNTED_PRINCIPAL);
         assertEq(principalManager.totalManagedAssets(), ACCOUNTED_PRINCIPAL);
         assertEq(principalManager.deployedAssets(), ACCOUNTED_PRINCIPAL);
@@ -72,8 +75,8 @@ contract PrincipalUnderflowIntegrationTest is Test {
         vm.prank(member);
         vm.expectRevert(
             abi.encodeWithSelector(
-                PrincipalManager.PrincipalInsolvent.selector,
-                ACCOUNTED_PRINCIPAL,
+                BondingTranche.RefundObligationExceedsManagedAssets.selector,
+                REFUND_OBLIGATION,
                 ACCOUNTED_PRINCIPAL - VAULT_LOSS
             )
         );

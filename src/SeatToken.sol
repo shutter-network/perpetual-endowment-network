@@ -3,11 +3,13 @@ pragma solidity ^0.8.24;
 
 import {AccessControl} from "openzeppelin-contracts/contracts/access/AccessControl.sol";
 import {ERC20} from "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
-import {ERC20Permit} from "openzeppelin-contracts/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import {ERC20Votes} from "openzeppelin-contracts/contracts/token/ERC20/extensions/ERC20Votes.sol";
+import {EIP712} from "openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
 import {Nonces} from "openzeppelin-contracts/contracts/utils/Nonces.sol";
 
-contract SeatToken is ERC20, ERC20Permit, ERC20Votes, AccessControl {
+import {ISeatToken} from "./interfaces/ISeatToken.sol";
+
+contract SeatToken is ISeatToken, ERC20, ERC20Votes, AccessControl {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
     bytes32 public constant ACTIVITY_ROLE = keccak256("ACTIVITY_ROLE");
@@ -20,7 +22,7 @@ contract SeatToken is ERC20, ERC20Permit, ERC20Votes, AccessControl {
     error NotSeatHolder(address account);
     error TransfersDisabled();
 
-    uint256 public immutable supplyCap;
+    uint256 public immutable override supplyCap;
     uint48 public immutable inactivityPeriod;
 
     mapping(address account => uint48) public lastActivityAt;
@@ -36,8 +38,10 @@ contract SeatToken is ERC20, ERC20Permit, ERC20Votes, AccessControl {
         address minter_,
         address burner_,
         address activityUpdater_
-    ) ERC20(name_, symbol_) ERC20Permit(name_) {
+    ) ERC20(name_, symbol_) EIP712(name_, "1") {
         if (admin_ == address(0)) revert InvalidAdmin(admin_);
+        // `uint208` upper bound is the ERC20Votes `_maxSupply()` ceiling — see
+        // https://docs.openzeppelin.com/contracts/5.x/api/token/erc20#ERC20Votes-_maxSupply--
         if (supplyCap_ == 0 || supplyCap_ > type(uint208).max) revert InvalidSupplyCap(supplyCap_);
         if (inactivityPeriod_ == 0) revert InvalidInactivityPeriod();
 
@@ -62,15 +66,15 @@ contract SeatToken is ERC20, ERC20Permit, ERC20Votes, AccessControl {
         return uint48(block.timestamp);
     }
 
-    function mint(address to, uint256 amount) external onlyRole(MINTER_ROLE) {
+    function mint(address to, uint256 amount) external override onlyRole(MINTER_ROLE) {
         _mint(to, amount);
     }
 
-    function burn(address from, uint256 amount) external onlyRole(BURNER_ROLE) {
+    function burn(address from, uint256 amount) external override onlyRole(BURNER_ROLE) {
         _burn(from, amount);
     }
 
-    function recordActivity(address account) external onlyRole(ACTIVITY_ROLE) {
+    function recordActivity(address account) external override onlyRole(ACTIVITY_ROLE) {
         _recordActivity(account);
     }
 
@@ -81,7 +85,7 @@ contract SeatToken is ERC20, ERC20Permit, ERC20Votes, AccessControl {
         }
     }
 
-    function isInactive(address account) public view returns (bool) {
+    function isInactive(address account) public view override returns (bool) {
         uint256 balance = balanceOf(account);
         if (balance == 0) {
             return false;
@@ -107,15 +111,11 @@ contract SeatToken is ERC20, ERC20Permit, ERC20Votes, AccessControl {
         revert ApprovalsDisabled();
     }
 
-    function permit(address, address, uint256, uint256, uint8, bytes32, bytes32) public pure override {
-        revert ApprovalsDisabled();
-    }
-
     function supportsInterface(bytes4 interfaceId) public view override(AccessControl) returns (bool) {
         return super.supportsInterface(interfaceId);
     }
 
-    function nonces(address owner) public view override(ERC20Permit, Nonces) returns (uint256) {
+    function nonces(address owner) public view override(Nonces) returns (uint256) {
         return super.nonces(owner);
     }
 

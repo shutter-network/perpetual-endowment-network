@@ -7,7 +7,9 @@ import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/Safe
 import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 
-contract PrincipalManager is AccessControl, ReentrancyGuard {
+import {IPrincipalManager} from "./interfaces/IPrincipalManager.sol";
+
+contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant BONDING_ROLE = keccak256("BONDING_ROLE");
@@ -22,10 +24,9 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
     error InvalidVault(address vault);
     error InvalidVaultAsset(address vault, address asset);
     error InvalidReceiver(address receiver);
-    error PrincipalInsolvent(uint256 accountedPrincipal, uint256 totalManagedAssets);
     error PrincipalUnderflow(uint256 accountedPrincipal, uint256 amount);
 
-    IERC20 public immutable asset;
+    IERC20 public immutable override asset;
     IERC4626 public principalVault;
     IERC4626[] public previousPrincipalVaults;
     mapping(address vault => bool) private _isPreviousPrincipalVault;
@@ -61,7 +62,13 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         _setPrincipalVault(initialPrincipalVault_);
     }
 
-    function recordPurchase(uint256 amount) external onlyRole(BONDING_ROLE) nonReentrant returns (uint256 shares) {
+    function recordPurchase(uint256 amount)
+        external
+        override
+        onlyRole(BONDING_ROLE)
+        nonReentrant
+        returns (uint256 shares)
+    {
         if (amount == 0) revert InvalidAmount();
 
         uint256 previousPrincipal = accountedPrincipal;
@@ -72,20 +79,15 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         return _depositExcessToPrincipalVault();
     }
 
-    function payRefund(address receiver, uint256 amount) external onlyRole(BONDING_ROLE) nonReentrant {
+    function payRefund(address receiver, uint256 amount) external override onlyRole(BONDING_ROLE) nonReentrant {
         if (amount == 0) revert InvalidAmount();
         if (amount > accountedPrincipal) revert PrincipalUnderflow(accountedPrincipal, amount);
-
-        uint256 managedAssets = totalManagedAssets();
-        if (managedAssets < accountedPrincipal) {
-            revert PrincipalInsolvent(accountedPrincipal, managedAssets);
-        }
 
         _ensureLiquidity(amount);
 
         uint256 previousPrincipal = accountedPrincipal;
         accountedPrincipal = previousPrincipal - amount;
-        
+
         asset.safeTransfer(receiver, amount);
 
         emit AccountedPrincipalDecreased(previousPrincipal, accountedPrincipal, amount);
@@ -107,7 +109,6 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
             if (newVault.asset() != address(asset)) {
                 revert InvalidPrincipalVaultAsset(address(newVault), address(asset));
             }
-            asset.forceApprove(address(newVault), type(uint256).max);
         }
 
         principalVault = newVault;
@@ -129,7 +130,12 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         emit LiquidReserveTargetUpdated(previousTarget, newTarget);
     }
 
-    function depositExcessToPrincipalVault() external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant returns (uint256 shares) {
+    function depositExcessToPrincipalVault()
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        nonReentrant
+        returns (uint256 shares)
+    {
         return _depositExcessToPrincipalVault();
     }
 
@@ -187,12 +193,11 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         nonReentrant
         returns (uint256 shares)
     {
-        if (assets == 0) revert InvalidAmount();
         IERC4626 currentVault = principalVault;
         if (address(currentVault) == address(0)) revert InvalidPrincipalVault(address(0));
 
-        address resolvedReceiver = receiver == address(0) ? address(this) : receiver;
-        shares = currentVault.withdraw(assets, resolvedReceiver, address(this));
+        address resolvedReceiver;
+        (shares, resolvedReceiver) = _withdrawFromVault(currentVault, assets, receiver);
 
         emit PrincipalVaultWithdrawal(address(currentVault), resolvedReceiver, assets, shares);
     }
@@ -203,14 +208,13 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         nonReentrant
         returns (uint256 shares)
     {
-        if (assets == 0) revert InvalidAmount();
         if (address(vault) == address(0)) revert InvalidVault(address(0));
         if (vault.asset() != address(asset)) {
             revert InvalidVaultAsset(address(vault), address(asset));
         }
 
-        address resolvedReceiver = receiver == address(0) ? address(this) : receiver;
-        shares = vault.withdraw(assets, resolvedReceiver, address(this));
+        address resolvedReceiver;
+        (shares, resolvedReceiver) = _withdrawFromVault(vault, assets, receiver);
 
         emit VaultWithdrawal(address(vault), resolvedReceiver, assets, shares);
     }
@@ -219,19 +223,19 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         return asset.balanceOf(address(this));
     }
 
-    function deployedAssets() public view returns (uint256) {
+    function deployedAssets() public view returns (uint256 assets) {
         IERC4626 currentVault = principalVault;
         if (address(currentVault) != address(0)) {
             uint256 currentShares = currentVault.balanceOf(address(this));
             if (currentShares != 0) {
-                return _deployedAssetsFromPreviousVaults(currentVault.convertToAssets(currentShares), currentVault);
+                assets = currentVault.convertToAssets(currentShares);
             }
         }
 
-        return _deployedAssetsFromPreviousVaults(0, currentVault);
+        assets += _deployedAssetsFromPreviousVaults(currentVault);
     }
 
-    function totalManagedAssets() public view returns (uint256) {
+    function totalManagedAssets() public view override returns (uint256) {
         return liquidAssets() + deployedAssets();
     }
 
@@ -253,10 +257,20 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         return liquid - liquidReserveTarget;
     }
 
+    function _withdrawFromVault(IERC4626 vault, uint256 assets, address receiver)
+        internal
+        returns (uint256 shares, address resolvedReceiver)
+    {
+        if (assets == 0) revert InvalidAmount();
+        resolvedReceiver = receiver == address(0) ? address(this) : receiver;
+        shares = vault.withdraw(assets, resolvedReceiver, address(this));
+    }
+
     function _depositToPrincipalVault(uint256 assets) internal returns (uint256 shares) {
         IERC4626 currentVault = principalVault;
         if (address(currentVault) == address(0)) revert InvalidPrincipalVault(address(0));
 
+        asset.forceApprove(address(currentVault), assets);
         shares = currentVault.deposit(assets, address(this));
         emit PrincipalVaultDeposit(address(currentVault), assets, shares);
     }
@@ -312,12 +326,7 @@ contract PrincipalManager is AccessControl, ReentrancyGuard {
         previousPrincipalVaults.push(vault);
     }
 
-    function _deployedAssetsFromPreviousVaults(uint256 baseAssets, IERC4626 currentVault)
-        internal
-        view
-        returns (uint256 assets)
-    {
-        assets = baseAssets;
+    function _deployedAssetsFromPreviousVaults(IERC4626 currentVault) internal view returns (uint256 assets) {
         uint256 length = previousPrincipalVaults.length;
 
         for (uint256 i; i < length; ++i) {

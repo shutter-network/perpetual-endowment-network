@@ -17,9 +17,15 @@ import {IVotingTypes} from "decent-contracts/contracts/interfaces/decent/deploya
 import {IModuleAzoriusV1} from "decent-contracts/contracts/interfaces/decent/deployables/IModuleAzoriusV1.sol";
 import {IStrategyV1} from "decent-contracts/contracts/interfaces/decent/deployables/IStrategyV1.sol";
 import {ModuleAzoriusV1} from "decent-contracts/contracts/deployables/modules/ModuleAzoriusV1.sol";
-import {VotingWeightERC20V1} from "decent-contracts/contracts/deployables/strategies/voting-weight/VotingWeightERC20V1.sol";
-import {VoteTrackerERC20V1} from "decent-contracts/contracts/deployables/strategies/vote-trackers/VoteTrackerERC20V1.sol";
-import {ProposerAdapterERC20V1} from "decent-contracts/contracts/deployables/strategies/proposer-adapters/ProposerAdapterERC20V1.sol";
+import {
+    VotingWeightERC20V1
+} from "decent-contracts/contracts/deployables/strategies/voting-weight/VotingWeightERC20V1.sol";
+import {
+    VoteTrackerERC20V1
+} from "decent-contracts/contracts/deployables/strategies/vote-trackers/VoteTrackerERC20V1.sol";
+import {
+    ProposerAdapterERC20V1
+} from "decent-contracts/contracts/deployables/strategies/proposer-adapters/ProposerAdapterERC20V1.sol";
 import {MockAvatar} from "decent-contracts/contracts/mocks/MockAvatar.sol";
 
 contract ApathyCleanupIntegrationTest is Test {
@@ -59,14 +65,7 @@ contract ApathyCleanupIntegrationTest is Test {
         members[9] = makeAddr("judy");
 
         seatToken = new SeatToken(
-            "PEN Seat",
-            "SEAT",
-            TOTAL_SEATS,
-            INACTIVITY_PERIOD,
-            address(this),
-            address(this),
-            address(0),
-            address(0)
+            "PEN Seat", "SEAT", TOTAL_SEATS, INACTIVITY_PERIOD, address(this), address(this), address(0), address(0)
         );
 
         for (uint256 i; i < MEMBER_COUNT; ++i) {
@@ -75,13 +74,7 @@ contract ApathyCleanupIntegrationTest is Test {
 
         asset = new ERC20Mock();
         avatar = new MockAvatar();
-        principalManager = new PrincipalManager(
-            asset,
-            address(avatar),
-            address(0),
-            100,
-            IERC4626(address(0))
-        );
+        principalManager = new PrincipalManager(asset, address(avatar), address(0), 100, IERC4626(address(0)));
 
         uint256[] memory upperBounds = new uint256[](1);
         uint256[] memory prices = new uint256[](1);
@@ -101,13 +94,7 @@ contract ApathyCleanupIntegrationTest is Test {
 
         avatar.enableModule(address(azorius));
 
-        strategy.initialize(
-            VOTING_PERIOD,
-            MEMBER_SEATS,
-            500_001,
-            _singleAddress(address(proposerAdapter)),
-            address(0)
-        );
+        strategy.initialize(VOTING_PERIOD, MEMBER_SEATS, 500_001, _singleAddress(address(proposerAdapter)), address(0));
         strategy.initialize2(address(azorius), _singleVotingConfig());
     }
 
@@ -153,26 +140,25 @@ contract ApathyCleanupIntegrationTest is Test {
         assertEq(uint8(azorius.proposalState(proposalId)), uint8(IModuleAzoriusV1.ProposalState.EXECUTED));
     }
 
-    function _submitProposalAndVote(
-        uint256 newReserveTarget_,
-        address proposer_
-    ) internal returns (uint32 proposalId_) {
+    function _submitProposalAndVote(uint256 newReserveTarget_, address proposer_)
+        internal
+        returns (uint32 proposalId_)
+    {
         proposalId_ = uint32(azorius.totalProposalCount());
         Transaction[] memory transactions = _setReserveTransactions(newReserveTarget_);
 
         vm.prank(proposer_);
-        azorius.submitProposal(
-            transactions,
-            "ipfs://pen-proposal/cleanup",
-            address(proposerAdapter),
-            ""
-        );
+        azorius.submitProposal(transactions, "ipfs://pen-proposal/cleanup", address(proposerAdapter), "");
 
         vm.warp(block.timestamp + 1);
         _castYes(proposalId_, proposer_);
     }
 
-    function _setReserveTransactions(uint256 newReserveTarget_) internal view returns (Transaction[] memory transactions) {
+    function _setReserveTransactions(uint256 newReserveTarget_)
+        internal
+        view
+        returns (Transaction[] memory transactions)
+    {
         transactions = new Transaction[](1);
         transactions[0] = Transaction({
             to: address(principalManager),
@@ -217,12 +203,7 @@ contract ApathyCleanupIntegrationTest is Test {
         ModuleAzoriusV1 implementation = new ModuleAzoriusV1();
         deployed = ModuleAzoriusV1(Clones.clone(address(implementation)));
         deployed.initialize(
-            address(this),
-            address(avatar),
-            address(avatar),
-            address(strategy),
-            TIMELOCK_PERIOD,
-            EXECUTION_PERIOD
+            address(this), address(avatar), address(avatar), address(strategy), TIMELOCK_PERIOD, EXECUTION_PERIOD
         );
     }
 
@@ -241,16 +222,9 @@ contract ApathyCleanupIntegrationTest is Test {
         items[0] = item_;
     }
 
-    function _singleVotingConfig()
-        internal
-        view
-        returns (IVotingTypes.VotingConfig[] memory votingConfigs)
-    {
+    function _singleVotingConfig() internal view returns (IVotingTypes.VotingConfig[] memory votingConfigs) {
         votingConfigs = new IVotingTypes.VotingConfig[](1);
-        votingConfigs[0] = IVotingTypes.VotingConfig({
-            votingWeight: address(votingWeight),
-            voteTracker: address(voteTracker)
-        });
+        votingConfigs[0] =
+            IVotingTypes.VotingConfig({votingWeight: address(votingWeight), voteTracker: address(voteTracker)});
     }
-
 }

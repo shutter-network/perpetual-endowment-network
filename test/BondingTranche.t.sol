@@ -147,7 +147,8 @@ contract BondingTrancheTest is Test {
         address alice2 = makeAddr("alice2");
 
         // SeatToken cap can be larger than the initial tranche sale cap.
-        SeatToken seatToken2 = new SeatToken("PEN Seat", "SEAT", 100, 365 days, admin2, address(0), address(0), address(0));
+        SeatToken seatToken2 =
+            new SeatToken("PEN Seat", "SEAT", 100, 365 days, admin2, address(0), address(0), address(0));
         PrincipalManager principalManager2 = new PrincipalManager(usdc2, admin2, address(0), 0, IERC4626(address(0)));
 
         uint256[] memory upperBounds = new uint256[](3);
@@ -176,7 +177,7 @@ contract BondingTrancheTest is Test {
         vm.stopPrank();
 
         // Further purchases are sold out until governance extends tranches.
-        vm.expectRevert(BondingTranche.SoldOut.selector);
+        vm.expectRevert(abi.encodeWithSelector(BondingTranche.InsufficientSeatsAvailable.selector, 1, 0));
         tranche2.quotePurchase(1);
 
         // Governance extends the sale cap from 10 -> 12 with a new price tier.
@@ -208,7 +209,8 @@ contract BondingTrancheTest is Test {
         address alice2 = makeAddr("alice2");
 
         // SeatToken cap can be larger than the initial tranche sale cap.
-        SeatToken seatToken2 = new SeatToken("PEN Seat", "SEAT", 100, 365 days, admin2, address(0), address(0), address(0));
+        SeatToken seatToken2 =
+            new SeatToken("PEN Seat", "SEAT", 100, 365 days, admin2, address(0), address(0), address(0));
         PrincipalManager principalManager2 = new PrincipalManager(usdc2, admin2, address(0), 0, IERC4626(address(0)));
 
         uint256[] memory upperBounds = new uint256[](1);
