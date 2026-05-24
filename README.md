@@ -11,6 +11,7 @@ PEN is a minimal on-chain core for a seat-based membership treasury: members buy
   - [Local setup](#local-setup)
   - [Environment configuration](#environment-configuration)
   - [Deployment](#deployment)
+  - [Publishing the Deployment](#publishing-the-deployment)
 - [Usage Flows](#usage-flows)
   - [Purchase](#purchase)
   - [Refund](#refund)
@@ -150,6 +151,28 @@ Append `--verify --etherscan-api-key "$ETHERSCAN_API_KEY"` to the broadcast comm
 #### Operational caveat — nonce binding
 
 Address prediction is bound to the deployer's nonce. **Any other transaction from the deployer between preview and broadcast invalidates every predicted address**, including the Safe address. Use a dedicated, otherwise-idle account for deployment, and broadcast immediately after previewing.
+
+### Publishing the Deployment
+
+After successfully deploying Shutter PEN, you can propose the deployment to the community by creating a PR in [shutter-pen-deployment-artifacts](https://github.com/shutter-network/shutter-pen-deployment-artifacts).
+
+After `--broadcast`, Foundry writes per-deployment JSON artifacts (`run-latest.json`, `run-<timestamp>.json`) under `broadcast/DeployPENSystem.s.sol/<chainId>/`.
+
+Fork the artifacts repository, then run the following commands (outside of this repository):
+
+```sh
+git clone git@github.com:<<YOUR_FORK_OF_SHUTTER_PEN_DEPLOYMENT_ARTIFACTS>>.git
+cd shutter-pen-deployment-artifacts
+mkdir -p deployments
+cp -a <<PATH_TO_PEN_REPOSITORY>>/broadcast/DeployPENSystem.s.sol/. deployments/
+git add deployments
+git commit -m "Shutter PEN deployment by <<YOUR_NAME>>"
+git push -u origin main
+```
+
+This copies every chain subfolder (named by chain id) that Foundry produced, so you do not need to know or look up the chain id yourself.
+
+This will create a new commit in your fork of the `shutter-pen-deployment-artifacts` repository and push the deployment artifacts to it. Please open a PR with this branch against the `main` branch of the `shutter-pen-deployment-artifacts` repository.
 
 ## Usage Flows
 
