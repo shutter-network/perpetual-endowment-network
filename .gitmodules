@@ -4,9 +4,6 @@
 [submodule "lib/openzeppelin-contracts"]
 	path = lib/openzeppelin-contracts
 	url = https://github.com/OpenZeppelin/openzeppelin-contracts.git
-[submodule "lib/decent-contracts"]
-	path = lib/decent-contracts
-	url = https://github.com/decentdao/decent-contracts.git
 [submodule "lib/prb-math"]
 	path = lib/prb-math
 	url = https://github.com/PaulRBerg/prb-math.git
@@ -15,10 +12,13 @@
 	url = https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable.git
 [submodule "lib/zodiac"]
 	path = lib/zodiac
-	url = https://github.com/gnosisguild/zodiac.git
+	url = https://github.com/gnosisguild/zodiac
 [submodule "lib/account-abstraction"]
 	path = lib/account-abstraction
 	url = https://github.com/eth-infinitism/account-abstraction.git
 [submodule "lib/safe-smart-account"]
 	path = lib/safe-smart-account
 	url = https://github.com/safe-global/safe-smart-account.git
+[submodule "lib/sx-evm"]
+	path = lib/sx-evm
+	url = https://github.com/snapshot-labs/sx-evm

@@ -18,5 +18,6 @@ contract DeployPENSystem is PENDeploymentScriptBase {
         _stopBroadcast();
 
         _logAddresses(deployed);
+        _writeDeploymentArtifact(deployed);
     }
 }

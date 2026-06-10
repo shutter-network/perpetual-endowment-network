@@ -11,4 +11,6 @@ interface IPrincipalManager {
     function payRefund(address receiver, uint256 amount) external;
 
     function totalManagedAssets() external view returns (uint256);
+
+    function migrationActive() external view returns (bool);
 }

@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {AccessControl} from "openzeppelin-contracts/contracts/access/AccessControl.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
@@ -14,6 +15,7 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
 
     bytes32 public constant BONDING_ROLE = keccak256("BONDING_ROLE");
 
+    error AssetDecimalsMismatch(uint8 expected, uint8 actual);
     error InsufficientLiquidity(uint256 requested, uint256 available);
     error InvalidAdmin(address admin);
     error InvalidAmount();
@@ -24,9 +26,16 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
     error InvalidVault(address vault);
     error InvalidVaultAsset(address vault, address asset);
     error InvalidReceiver(address receiver);
+    error MigrationActive();
+    error MigrationAlreadyActive();
+    error MigrationNotActive();
+    error MigrationStateNotClean();
+    error MigrationUnderfunded(uint256 required, uint256 available);
     error PrincipalUnderflow(uint256 accountedPrincipal, uint256 amount);
 
-    IERC20 public immutable override asset;
+    IERC20 public override asset;
+    IERC20 public pendingAsset;
+    bool public migrationActive;
     IERC4626 public principalVault;
     IERC4626[] public previousPrincipalVaults;
     mapping(address vault => bool) private _isPreviousPrincipalVault;
@@ -35,8 +44,12 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
 
     event AccountedPrincipalDecreased(uint256 previousPrincipal, uint256 newPrincipal, uint256 amount);
     event AccountedPrincipalIncreased(uint256 previousPrincipal, uint256 newPrincipal, uint256 amount);
+    event AssetMigrationBegan(address indexed oldAsset, address indexed pendingAsset);
+    event AssetMigrationCompleted(address indexed oldAsset, address indexed newAsset);
+    event AssetMigrationCancelled();
     event LiquidReserveTargetUpdated(uint256 previousTarget, uint256 newTarget);
     event FundingExecuted(address[] indexed recipients, uint256[] amounts);
+    event MigrationWithdrawal(address indexed asset, address indexed receiver, uint256 amount);
     event RefundPaid(address indexed receiver, uint256 amount);
     event PrincipalVaultDeposit(address indexed vault, uint256 assets, uint256 shares);
     event PrincipalVaultUpdated(address indexed previousVault, address indexed newVault);
@@ -69,6 +82,7 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
         nonReentrant
         returns (uint256 shares)
     {
+        if (migrationActive) revert MigrationActive();
         if (amount == 0) revert InvalidAmount();
 
         uint256 previousPrincipal = accountedPrincipal;
@@ -80,6 +94,7 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
     }
 
     function payRefund(address receiver, uint256 amount) external override onlyRole(BONDING_ROLE) nonReentrant {
+        if (migrationActive) revert MigrationActive();
         if (amount == 0) revert InvalidAmount();
         if (amount > accountedPrincipal) revert PrincipalUnderflow(accountedPrincipal, amount);
 
@@ -95,6 +110,7 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
     }
 
     function setPrincipalVault(IERC4626 newVault) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (migrationActive) revert MigrationActive();
         _setPrincipalVault(newVault);
     }
 
@@ -136,6 +152,7 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
         nonReentrant
         returns (uint256 shares)
     {
+        if (migrationActive) revert MigrationActive();
         return _depositExcessToPrincipalVault();
     }
 
@@ -179,6 +196,7 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
         nonReentrant
         returns (uint256 shares)
     {
+        if (migrationActive) revert MigrationActive();
         if (assets == 0) revert InvalidAmount();
         if (assets > excessLiquidAssets()) {
             revert InsufficientLiquidity(assets, excessLiquidAssets());
@@ -193,6 +211,7 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
         nonReentrant
         returns (uint256 shares)
     {
+        if (migrationActive) revert MigrationActive();
         IERC4626 currentVault = principalVault;
         if (address(currentVault) == address(0)) revert InvalidPrincipalVault(address(0));
 
@@ -217,6 +236,66 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
         (shares, resolvedReceiver) = _withdrawFromVault(vault, assets, receiver);
 
         emit VaultWithdrawal(address(vault), resolvedReceiver, assets, shares);
+    }
+
+    function beginAssetMigration(IERC20 newAsset) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (address(newAsset) == address(0) || address(newAsset) == address(asset)) revert InvalidAsset(address(newAsset));
+        if (migrationActive) revert MigrationAlreadyActive();
+        uint8 currentDecimals = IERC20Metadata(address(asset)).decimals();
+        uint8 newDecimals = IERC20Metadata(address(newAsset)).decimals();
+        if (currentDecimals != newDecimals) revert AssetDecimalsMismatch(currentDecimals, newDecimals);
+
+        if (address(principalVault) != address(0)) {
+            asset.forceApprove(address(principalVault), 0);
+            _trackPreviousVault(principalVault);
+            principalVault = IERC4626(address(0));
+        }
+
+        pendingAsset = newAsset;
+        migrationActive = true;
+        emit AssetMigrationBegan(address(asset), address(newAsset));
+    }
+
+    function migrationWithdraw(address receiver, uint256 amount)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        nonReentrant
+    {
+        if (!migrationActive) revert MigrationNotActive();
+        if (receiver == address(0)) revert InvalidReceiver(receiver);
+        if (amount == 0) revert InvalidAmount();
+        asset.safeTransfer(receiver, amount);
+        emit MigrationWithdrawal(address(asset), receiver, amount);
+    }
+
+    function completeAssetMigration() external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        if (!migrationActive) revert MigrationNotActive();
+        if (asset.balanceOf(address(this)) != 0) revert MigrationStateNotClean();
+
+        uint256 length = previousPrincipalVaults.length;
+        for (uint256 i; i < length; ++i) {
+            if (previousPrincipalVaults[i].balanceOf(address(this)) != 0) revert MigrationStateNotClean();
+        }
+
+        uint256 newBalance = pendingAsset.balanceOf(address(this));
+        if (newBalance < accountedPrincipal) revert MigrationUnderfunded(accountedPrincipal, newBalance);
+
+        address oldAsset = address(asset);
+        asset = pendingAsset;
+        pendingAsset = IERC20(address(0));
+        migrationActive = false;
+        for (uint256 i; i < length; ++i) {
+            delete _isPreviousPrincipalVault[address(previousPrincipalVaults[i])];
+        }
+        delete previousPrincipalVaults;
+        emit AssetMigrationCompleted(oldAsset, address(asset));
+    }
+
+    function cancelAssetMigration() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (!migrationActive) revert MigrationNotActive();
+        pendingAsset = IERC20(address(0));
+        migrationActive = false;
+        emit AssetMigrationCancelled();
     }
 
     function liquidAssets() public view returns (uint256) {
