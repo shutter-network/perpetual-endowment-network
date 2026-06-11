@@ -43,9 +43,9 @@ contract PENTxAuthenticatorTest is Test {
     function setUp() public {
         // Test contract is admin and minter for simplicity.
         seatToken = new SeatToken("PEN Seat", "SEAT", 1000, 365 days, address(this), address(this), address(0), address(0));
-        authenticator = new PENTxAuthenticator(ISeatToken(address(seatToken)));
-        seatToken.grantRole(seatToken.ACTIVITY_ROLE(), address(authenticator));
         mockSpace = new MockSpace();
+        authenticator = new PENTxAuthenticator(ISeatToken(address(seatToken)), address(mockSpace));
+        seatToken.grantRole(seatToken.ACTIVITY_ROLE(), address(authenticator));
     }
 
     // -- calldata helpers -----------------------------------------------------
@@ -140,5 +140,12 @@ contract PENTxAuthenticatorTest is Test {
         vm.prank(alice);
         vm.expectRevert(PENTxAuthenticator.InvalidFunctionSelector.selector);
         authenticator.authenticate(address(mockSpace), BAD_SELECTOR, bytes(""));
+    }
+
+    function test_authenticate_revertsOnWrongTarget() public {
+        address notSpace = makeAddr("notSpace");
+        vm.prank(alice);
+        vm.expectRevert(PENTxAuthenticator.InvalidTarget.selector);
+        authenticator.authenticate(notSpace, VOTE_SELECTOR, _voteData(alice, Choice.For));
     }
 }

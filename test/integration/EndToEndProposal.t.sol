@@ -265,8 +265,6 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
             );
         }
 
-        d.penTxAuthenticator = address(new PENTxAuthenticator(ISeatToken(d.seatToken)));
-
         pf = address(proxyFactory);
         si = address(spaceImpl);
         pv = address(propValidation);
@@ -296,6 +294,11 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         uint256 ssn
     ) private {
         {
+            // Pre-compute the space address so PENTxAuthenticator can be constructed with it
+            // before the space proxy is deployed — same pattern as the production deploy script.
+            address spaceAddr = _computeProxyAddress(pf, si, address(this), ssn);
+            d.penTxAuthenticator = address(new PENTxAuthenticator(ISeatToken(d.seatToken), spaceAddr));
+
             Strategy[] memory votingStrategies = new Strategy[](1);
             votingStrategies[0] =
                 Strategy({addr: d.seatVotingStrategy, params: abi.encode(d.seatToken)});
@@ -326,7 +329,7 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
             });
 
             ProxyFactory(pf).deployProxy(si, abi.encodeCall(ISpace.initialize, (spaceInit)), ssn);
-            d.space = _computeProxyAddress(pf, si, address(this), ssn);
+            d.space = spaceAddr;
         }
 
         address spaceExecTarget = timelockEnabled ? d.timelockExecutionStrategy : d.executionStrategy;

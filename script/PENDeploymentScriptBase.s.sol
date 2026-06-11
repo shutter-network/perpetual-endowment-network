@@ -177,7 +177,7 @@ abstract contract PENDeploymentHelper {
             _deployCoreContracts(expected_, config_, bootstrapAuthority_);
 
         // Step 11: PENTxAuthenticator
-        deployed_.penTxAuthenticator = address(new PENTxAuthenticator(ISeatToken(deployed_.seatToken)));
+        deployed_.penTxAuthenticator = address(new PENTxAuthenticator(ISeatToken(deployed_.seatToken), expected_.space));
         _assertDeployedAddress("PEN_TX_AUTHENTICATOR", expected_.penTxAuthenticator, deployed_.penTxAuthenticator);
 
         // Step 12: Space proxy

@@ -13,15 +13,19 @@ import {ISeatToken} from "../interfaces/ISeatToken.sol";
 contract PENTxAuthenticator is Authenticator {
     error InvalidFunctionSelector();
     error InvalidMessageSender();
+    error InvalidTarget();
 
     ISeatToken public immutable seat;
+    address public immutable space;
 
-    constructor(ISeatToken seat_) {
+    constructor(ISeatToken seat_, address space_) {
         seat = seat_;
+        space = space_;
     }
 
     /// @notice Authenticates the caller, forwards the call to the Space, then records activity.
     function authenticate(address target, bytes4 functionSelector, bytes calldata data) external {
+        if (target != space) revert InvalidTarget();
         address actor = _extractActor(functionSelector, data);
         if (actor != msg.sender) revert InvalidMessageSender();
 
