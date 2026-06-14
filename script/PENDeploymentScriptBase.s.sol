@@ -11,7 +11,6 @@ import {console2} from "forge-std/console2.sol";
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
 import {SeatToken} from "../src/SeatToken.sol";
-import {SeatVotingStrategy} from "../src/governance/SeatVotingStrategy.sol";
 import {PENTxAuthenticator} from "../src/governance/PENTxAuthenticator.sol";
 import {ISeatToken} from "../src/interfaces/ISeatToken.sol";
 import {PENSafeBootstrap} from "../src/deployment/PENSafeBootstrap.sol";
@@ -71,6 +70,7 @@ abstract contract PENDeploymentHelper {
         address sxAvatarImpl;
         address sxTimelockImpl;
         address sxPropositionPowerValidation;
+        address sxOzVotesStrategy;
         uint32 votingDelay;
         uint32 minVotingDuration;
         uint32 maxVotingDuration;
@@ -93,10 +93,9 @@ abstract contract PENDeploymentHelper {
         address seatToken;
         address principalManager;
         address bondingTranche;
-        address seatVotingStrategy;
         address penTxAuthenticator;
-        address space;                     // Snapshot X Space, cloned from sxMasterSpace
-        address executionStrategy;         // AvatarExecutionStrategy proxy
+        address space; // Snapshot X Space, cloned from sxMasterSpace
+        address executionStrategy; // AvatarExecutionStrategy proxy
         address timelockExecutionStrategy; // TimelockExecutionStrategy proxy; 0x0 if disabled
     }
 
@@ -113,14 +112,12 @@ abstract contract PENDeploymentHelper {
         predicted_.safeSingleton = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.safeProxyFactory = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.safeBootstrap = _computeCreateAddress(deployer_, nextNonce++);
-        predicted_.seatVotingStrategy = _computeCreateAddress(deployer_, nextNonce++);
 
         // Each ProxyFactory.deployProxy call is a deployer tx (advances nonce), but the
         // proxy address is CREATE2-based (salt = keccak256(deployer, saltNonce)).
         nextNonce++; // avatar proxy tx
-        predicted_.executionStrategy = _computeProxyAddress(
-            config_.governance.sxProxyFactory, config_.governance.sxAvatarImpl, deployer_, 0
-        );
+        predicted_.executionStrategy =
+            _computeProxyAddress(config_.governance.sxProxyFactory, config_.governance.sxAvatarImpl, deployer_, 0);
 
         if (config_.governance.timelockEnabled) {
             nextNonce++; // timelock proxy tx
@@ -132,10 +129,10 @@ abstract contract PENDeploymentHelper {
         nextNonce++; // safeProxyFactory.createProxyWithNonce tx (Safe uses CREATE2 internally)
         predicted_.safe = _predictSafeAddress(predicted_, salt_);
 
-        predicted_.seatToken           = _computeCreateAddress(deployer_, nextNonce++);
-        predicted_.principalManager    = _computeCreateAddress(deployer_, nextNonce++);
-        predicted_.bondingTranche      = _computeCreateAddress(deployer_, nextNonce++);
-        predicted_.penTxAuthenticator  = _computeCreateAddress(deployer_, nextNonce++);
+        predicted_.seatToken = _computeCreateAddress(deployer_, nextNonce++);
+        predicted_.principalManager = _computeCreateAddress(deployer_, nextNonce++);
+        predicted_.bondingTranche = _computeCreateAddress(deployer_, nextNonce++);
+        predicted_.penTxAuthenticator = _computeCreateAddress(deployer_, nextNonce++);
 
         uint256 spaceSaltNonce = config_.governance.timelockEnabled ? 2 : 1;
         nextNonce++; // space proxy tx
@@ -161,8 +158,10 @@ abstract contract PENDeploymentHelper {
         deployed_.safeBootstrap = address(new PENSafeBootstrap());
         _assertDeployedAddress("SAFE_BOOTSTRAP", expected_.safeBootstrap, deployed_.safeBootstrap);
 
-        // Steps 4–6: SeatVotingStrategy + execution strategy proxies
-        (deployed_.seatVotingStrategy, deployed_.executionStrategy, deployed_.timelockExecutionStrategy) =
+        // Steps 4–5: execution strategy proxies (avatar + optional timelock).
+        // Voting power uses the canonical stock `OZVotesVotingStrategy` at
+        // `config_.governance.sxOzVotesStrategy` — no PEN-specific voting strategy is deployed.
+        (deployed_.executionStrategy, deployed_.timelockExecutionStrategy) =
             _deployGovernanceContracts(expected_, config_, bootstrapAuthority_);
 
         // Step 7: Safe proxy (owners = [module], module enabled via delegatecall to PENSafeBootstrap)
@@ -195,29 +194,18 @@ abstract contract PENDeploymentHelper {
         DeploymentAddresses memory expected_,
         DeploymentConfig memory config_,
         address deployer_
-    ) internal returns (
-        address seatVotingStrategy_,
-        address executionStrategy_,
-        address timelockExecutionStrategy_
-    ) {
-        seatVotingStrategy_ = address(new SeatVotingStrategy());
-        _assertDeployedAddress("SEAT_VOTING_STRATEGY", expected_.seatVotingStrategy, seatVotingStrategy_);
-
+    ) internal returns (address executionStrategy_, address timelockExecutionStrategy_) {
         IProxyFactory proxyFactory = IProxyFactory(config_.governance.sxProxyFactory);
 
         // AvatarExecutionStrategy: owner = deployer (transferred to Safe in _initializeGovernance),
         // target = Safe, no spaces yet (added via enableSpace after Space is deployed).
-        bytes memory avatarInitParams = abi.encode(
-            deployer_, expected_.safe, new address[](0), config_.governance.avatarQuorum
-        );
+        bytes memory avatarInitParams =
+            abi.encode(deployer_, expected_.safe, new address[](0), config_.governance.avatarQuorum);
         proxyFactory.deployProxy(
-            config_.governance.sxAvatarImpl,
-            abi.encodeCall(AvatarExecutionStrategy.setUp, (avatarInitParams)),
-            0
+            config_.governance.sxAvatarImpl, abi.encodeCall(AvatarExecutionStrategy.setUp, (avatarInitParams)), 0
         );
-        executionStrategy_ = _computeProxyAddress(
-            config_.governance.sxProxyFactory, config_.governance.sxAvatarImpl, deployer_, 0
-        );
+        executionStrategy_ =
+            _computeProxyAddress(config_.governance.sxProxyFactory, config_.governance.sxAvatarImpl, deployer_, 0);
         _assertDeployedAddress("EXECUTION_STRATEGY", expected_.executionStrategy, executionStrategy_);
 
         if (config_.governance.timelockEnabled) {
@@ -286,18 +274,21 @@ abstract contract PENDeploymentHelper {
         _assertDeployedAddress("BONDING_TRANCHE", expected_.bondingTranche, bondingTranche_);
     }
 
-    function _deploySpace(
-        DeploymentAddresses memory deployed_,
-        DeploymentConfig memory config_,
-        address deployer_
-    ) internal returns (address space_) {
+    function _deploySpace(DeploymentAddresses memory deployed_, DeploymentConfig memory config_, address deployer_)
+        internal
+        returns (address space_)
+    {
+        // Stock `OZVotesVotingStrategy` decodes its params via `address(bytes20(params))`,
+        // which is the raw 20-byte encoding (`abi.encodePacked`), not the 32-byte padded
+        // `abi.encode`.
+        bytes memory ozVotesParams = abi.encodePacked(deployed_.seatToken);
+
         Strategy[] memory votingStrategies = new Strategy[](1);
-        votingStrategies[0] = Strategy({addr: deployed_.seatVotingStrategy, params: abi.encode(deployed_.seatToken)});
+        votingStrategies[0] = Strategy({addr: config_.governance.sxOzVotesStrategy, params: ozVotesParams});
 
         // PropositionPower params: (threshold, allowedStrategies[])
         Strategy[] memory propPowerStrategies = new Strategy[](1);
-        propPowerStrategies[0] =
-            Strategy({addr: deployed_.seatVotingStrategy, params: abi.encode(deployed_.seatToken)});
+        propPowerStrategies[0] = Strategy({addr: config_.governance.sxOzVotesStrategy, params: ozVotesParams});
 
         string[] memory votingStrategyMetadataURIs = new string[](1);
         votingStrategyMetadataURIs[0] = "";
@@ -323,11 +314,10 @@ abstract contract PENDeploymentHelper {
         });
 
         uint256 spaceSaltNonce = config_.governance.timelockEnabled ? 2 : 1;
-        IProxyFactory(config_.governance.sxProxyFactory).deployProxy(
-            config_.governance.sxMasterSpace,
-            abi.encodeCall(ISpace.initialize, (spaceInit)),
-            spaceSaltNonce
-        );
+        IProxyFactory(config_.governance.sxProxyFactory)
+            .deployProxy(
+                config_.governance.sxMasterSpace, abi.encodeCall(ISpace.initialize, (spaceInit)), spaceSaltNonce
+            );
 
         space_ = _computeProxyAddress(
             config_.governance.sxProxyFactory, config_.governance.sxMasterSpace, deployer_, spaceSaltNonce
@@ -363,7 +353,13 @@ abstract contract PENDeploymentHelper {
         seatToken.grantRole(seatToken.MINTER_ROLE(), deployed_.bondingTranche);
         seatToken.grantRole(seatToken.BURNER_ROLE(), deployed_.bondingTranche);
         seatToken.grantRole(seatToken.ACTIVITY_ROLE(), deployed_.penTxAuthenticator);
-        seatToken.grantRole(seatToken.DEFAULT_ADMIN_ROLE(), deployed_.safe);
+        // `DEFAULT_ADMIN_ROLE` is intentionally NOT granted to the Safe before the deployer
+        // renounces. SeatToken has no admin-gated operational functions — `DEFAULT_ADMIN_ROLE`
+        // there only controls role reassignment. Leaving it unheld permanently freezes the
+        // MINTER / BURNER / ACTIVITY assignments above, so a captured governance majority
+        // can never re-route mint/burn rights to confiscate or dilute seats.
+        // PrincipalManager and BondingTranche keep their Safe-held admin roles because they
+        // gate real governance operations (executeFunding, extendTranches, asset migration).
         seatToken.renounceRole(seatToken.DEFAULT_ADMIN_ROLE(), bootstrapAuthority_);
 
         principalManager.grantRole(principalManager.BONDING_ROLE(), deployed_.bondingTranche);
@@ -461,6 +457,7 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
             sxAvatarImpl: vm.envAddress("SX_AVATAR_IMPL"),
             sxTimelockImpl: vm.envAddress("SX_TIMELOCK_IMPL"),
             sxPropositionPowerValidation: vm.envAddress("SX_PROPOSITION_POWER_VALIDATION"),
+            sxOzVotesStrategy: vm.envAddress("SX_OZ_VOTES_STRATEGY"),
             votingDelay: uint32(vm.envUint("VOTING_DELAY")),
             minVotingDuration: uint32(vm.envUint("MIN_VOTING_DURATION")),
             maxVotingDuration: uint32(vm.envUint("MAX_VOTING_DURATION")),
@@ -521,7 +518,6 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
         console2.log("SeatToken:                 ", d_.seatToken);
         console2.log("PrincipalManager:          ", d_.principalManager);
         console2.log("BondingTranche:            ", d_.bondingTranche);
-        console2.log("SeatVotingStrategy:        ", d_.seatVotingStrategy);
         console2.log("PENTxAuthenticator:        ", d_.penTxAuthenticator);
         console2.log("Space:                     ", d_.space);
         console2.log("ExecutionStrategy:         ", d_.executionStrategy);
@@ -531,18 +527,39 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
     function _writeDeploymentArtifact(DeploymentAddresses memory d_) internal {
         string memory json = string.concat(
             "{\n",
-            '  "safeSingleton": "',             vm.toString(d_.safeSingleton),             '",\n',
-            '  "safeProxyFactory": "',           vm.toString(d_.safeProxyFactory),           '",\n',
-            '  "safeBootstrap": "',              vm.toString(d_.safeBootstrap),              '",\n',
-            '  "safe": "',                       vm.toString(d_.safe),                       '",\n',
-            '  "seatToken": "',                  vm.toString(d_.seatToken),                  '",\n',
-            '  "principalManager": "',           vm.toString(d_.principalManager),           '",\n',
-            '  "bondingTranche": "',             vm.toString(d_.bondingTranche),             '",\n',
-            '  "seatVotingStrategy": "',         vm.toString(d_.seatVotingStrategy),         '",\n',
-            '  "penTxAuthenticator": "',         vm.toString(d_.penTxAuthenticator),         '",\n',
-            '  "space": "',                      vm.toString(d_.space),                      '",\n',
-            '  "executionStrategy": "',          vm.toString(d_.executionStrategy),          '",\n',
-            '  "timelockExecutionStrategy": "',  vm.toString(d_.timelockExecutionStrategy),  '"\n',
+            '  "safeSingleton": "',
+            vm.toString(d_.safeSingleton),
+            '",\n',
+            '  "safeProxyFactory": "',
+            vm.toString(d_.safeProxyFactory),
+            '",\n',
+            '  "safeBootstrap": "',
+            vm.toString(d_.safeBootstrap),
+            '",\n',
+            '  "safe": "',
+            vm.toString(d_.safe),
+            '",\n',
+            '  "seatToken": "',
+            vm.toString(d_.seatToken),
+            '",\n',
+            '  "principalManager": "',
+            vm.toString(d_.principalManager),
+            '",\n',
+            '  "bondingTranche": "',
+            vm.toString(d_.bondingTranche),
+            '",\n',
+            '  "penTxAuthenticator": "',
+            vm.toString(d_.penTxAuthenticator),
+            '",\n',
+            '  "space": "',
+            vm.toString(d_.space),
+            '",\n',
+            '  "executionStrategy": "',
+            vm.toString(d_.executionStrategy),
+            '",\n',
+            '  "timelockExecutionStrategy": "',
+            vm.toString(d_.timelockExecutionStrategy),
+            '"\n',
             "}"
         );
 

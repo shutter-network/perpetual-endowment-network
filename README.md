@@ -25,7 +25,7 @@ PEN is a minimal on-chain core for a seat-based membership treasury: members buy
 PEN splits governance into two layers:
 
 - **Off-chain (Snapshot, ranked-choice):** members propose candidate slates (recipients + amounts, plus "none of the above") and select a single *winning slate* via ranked-choice voting.
-- **On-chain (Snapshot X / EVM, YES/NO):** a member submits a proposal encoding the winning slate as executable transactions via `PENTxAuthenticator`; seat holders vote using `SeatVotingStrategy` (backed by `SeatToken.getPastVotes`); after the optional timelock, the proposal executes through `AvatarExecutionStrategy` → Safe.
+- **On-chain (Snapshot X / EVM, YES/NO):** a member submits a proposal encoding the winning slate as executable transactions via `PENTxAuthenticator`; seat holders vote using the stock `OZVotesVotingStrategy` (backed by `SeatToken.getPastVotes`); after the optional timelock, the proposal executes through `AvatarExecutionStrategy` → Safe.
 
 For PEN treasury batch payouts, the canonical execution call is `PrincipalManager.executeFunding(recipients, amounts)` — a single batched primitive that is materially cheaper under Snapshot X execution than `withdraw + N transfers`.
 
@@ -43,9 +43,10 @@ Further reading: [`docs/flows.md`](docs/flows.md), [`docs/pen-operator-guide.md`
 
 | Contract | Role | Holder / Purpose |
 | --- | --- | --- |
-| `SeatToken` | `MINTER_ROLE` | `BondingTranche` (mint on purchase) |
-| `SeatToken` | `BURNER_ROLE` | `BondingTranche` (burn on refund/reclaim) |
-| `SeatToken` | `ACTIVITY_ROLE` | `PENTxAuthenticator` (refresh activity on propose/vote) |
+| `SeatToken` | `DEFAULT_ADMIN_ROLE` | **Unheld** — renounced at deploy. No party can reroute the roles below. |
+| `SeatToken` | `MINTER_ROLE` | `BondingTranche` (mint on purchase) — frozen at deploy |
+| `SeatToken` | `BURNER_ROLE` | `BondingTranche` (burn on refund/reclaim) — frozen at deploy |
+| `SeatToken` | `ACTIVITY_ROLE` | `PENTxAuthenticator` (refresh activity on propose/vote) — frozen at deploy |
 | `BondingTranche` | `DEFAULT_ADMIN_ROLE` | Governance Safe |
 | `BondingTranche` | `RECLAIMER_ROLE` | Authorized reclaimer |
 | `PrincipalManager` | `DEFAULT_ADMIN_ROLE` | Governance Safe |

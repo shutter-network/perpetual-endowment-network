@@ -16,7 +16,7 @@ import {SeatToken} from "../../src/SeatToken.sol";
 import {BondingTranche} from "../../src/BondingTranche.sol";
 import {PrincipalManager} from "../../src/PrincipalManager.sol";
 import {PENTxAuthenticator} from "../../src/governance/PENTxAuthenticator.sol";
-import {SeatVotingStrategy} from "../../src/governance/SeatVotingStrategy.sol";
+import {OZVotesVotingStrategy} from "@snapshot-x/voting-strategies/OZVotesVotingStrategy.sol";
 import {ISeatToken} from "../../src/interfaces/ISeatToken.sol";
 import {PENSafeBootstrap} from "../../src/deployment/PENSafeBootstrap.sol";
 
@@ -54,10 +54,8 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
 
     // ── Authenticator selectors ────────────────────────────────────────────────
 
-    bytes4 internal constant PROPOSE_SELECTOR =
-        bytes4(keccak256("propose(address,string,(address,bytes),bytes)"));
-    bytes4 internal constant VOTE_SELECTOR =
-        bytes4(keccak256("vote(address,uint256,uint8,(uint8,bytes)[],string)"));
+    bytes4 internal constant PROPOSE_SELECTOR = bytes4(keccak256("propose(address,string,(address,bytes),bytes)"));
+    bytes4 internal constant VOTE_SELECTOR = bytes4(keccak256("vote(address,uint256,uint8,(uint8,bytes)[],string)"));
     bytes4 internal constant UPDATE_PROPOSAL_SELECTOR =
         bytes4(keccak256("updateProposal(address,uint256,(address,bytes),string)"));
 
@@ -65,6 +63,7 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
 
     DeploymentAddresses internal sys;
     MockERC20 internal paymentToken;
+    address internal ozVotesStrategy;
 
     address internal alice = makeAddr("alice");
     address internal bob = makeAddr("bob");
@@ -87,13 +86,9 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
 
         vm.deal(sys.safe, 1 ether);
 
-        // Grant MINTER_ROLE so test functions can mint seats directly.
-        // vm.startPrank is used (not vm.prank) because st.MINTER_ROLE() is an external
-        // call that would consume a single-use prank before grantRole is reached.
+        // MINTER_ROLE for this test contract was granted during _deploySpaceAndFinalize,
+        // before DEFAULT_ADMIN_ROLE on SeatToken was renounced. See that helper for context.
         SeatToken st = SeatToken(sys.seatToken);
-        vm.startPrank(sys.safe);
-        st.grantRole(st.MINTER_ROLE(), address(this));
-        vm.stopPrank();
 
         // alice=2, bob=1, charlie=1, dan=1, eve=1 → total 6 seats
         st.mint(alice, 2);
@@ -118,15 +113,13 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
 
     function _ethTransferPayload(address to, uint256 value) internal pure returns (bytes memory) {
         MetaTransaction[] memory txs = new MetaTransaction[](1);
-        txs[0] =
-            MetaTransaction({to: to, value: value, data: "", operation: Enum.Operation.Call, salt: 0});
+        txs[0] = MetaTransaction({to: to, value: value, data: "", operation: Enum.Operation.Call, salt: 0});
         return abi.encode(txs);
     }
 
     function _callPayload(address to, bytes memory data, uint256 salt) internal pure returns (bytes memory) {
         MetaTransaction[] memory txs = new MetaTransaction[](1);
-        txs[0] =
-            MetaTransaction({to: to, value: 0, data: data, operation: Enum.Operation.Call, salt: salt});
+        txs[0] = MetaTransaction({to: to, value: 0, data: data, operation: Enum.Operation.Call, salt: salt});
         return abi.encode(txs);
     }
 
@@ -134,9 +127,7 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
 
     // Use timelockExecutionStrategy when deployed; otherwise AvatarExecutionStrategy.
     function _activeExecStrategy() internal view returns (address) {
-        return sys.timelockExecutionStrategy != address(0)
-            ? sys.timelockExecutionStrategy
-            : sys.executionStrategy;
+        return sys.timelockExecutionStrategy != address(0) ? sys.timelockExecutionStrategy : sys.executionStrategy;
     }
 
     function _defaultUserStrategies() internal pure returns (IndexedStrategy[] memory strats) {
@@ -148,10 +139,7 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         proposalId = ISpaceExec(sys.space).nextProposalId();
 
         bytes memory data = abi.encode(
-            proposer,
-            "",
-            Strategy({addr: _activeExecStrategy(), params: payload}),
-            abi.encode(_defaultUserStrategies())
+            proposer, "", Strategy({addr: _activeExecStrategy(), params: payload}), abi.encode(_defaultUserStrategies())
         );
 
         vm.prank(proposer);
@@ -205,10 +193,11 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         d.safeSingleton = address(new Safe());
         d.safeProxyFactory = address(new SafeProxyFactory());
         d.safeBootstrap = address(new PENSafeBootstrap());
-        d.seatVotingStrategy = address(new SeatVotingStrategy());
+        // Stock voting strategy — same one the production deploy script wires through
+        // `SX_OZ_VOTES_STRATEGY`. Reads voting power from SeatToken.getPastVotes.
+        ozVotesStrategy = address(new OZVotesVotingStrategy());
 
-        d.executionStrategy =
-            _computeProxyAddress(address(proxyFactory), address(avatarImpl), address(this), 0);
+        d.executionStrategy = _computeProxyAddress(address(proxyFactory), address(avatarImpl), address(this), 0);
 
         ssn = 1;
         if (timelockEnabled) {
@@ -222,8 +211,7 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         proxyFactory.deployProxy(
             address(avatarImpl),
             abi.encodeCall(
-                AvatarExecutionStrategy.setUp,
-                (abi.encode(address(this), d.safe, new address[](0), uint256(QUORUM)))
+                AvatarExecutionStrategy.setUp, (abi.encode(address(this), d.safe, new address[](0), uint256(QUORUM)))
             ),
             0
         );
@@ -233,9 +221,7 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         }
 
         d.safe = address(
-            SafeProxyFactory(d.safeProxyFactory).createProxyWithNonce(
-                d.safeSingleton, _safeInitializer(d), uint256(0)
-            )
+            SafeProxyFactory(d.safeProxyFactory).createProxyWithNonce(d.safeSingleton, _safeInitializer(d), uint256(0))
         );
 
         d.seatToken = address(
@@ -299,9 +285,10 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
             address spaceAddr = _computeProxyAddress(pf, si, address(this), ssn);
             d.penTxAuthenticator = address(new PENTxAuthenticator(ISeatToken(d.seatToken), spaceAddr));
 
+            // OZVotesVotingStrategy expects raw 20-byte params (abi.encodePacked), not the
+            // 32-byte padded abi.encode that our previous custom strategy used.
             Strategy[] memory votingStrategies = new Strategy[](1);
-            votingStrategies[0] =
-                Strategy({addr: d.seatVotingStrategy, params: abi.encode(d.seatToken)});
+            votingStrategies[0] = Strategy({addr: ozVotesStrategy, params: abi.encodePacked(d.seatToken)});
 
             string[] memory metadataURIs = new string[](1);
             metadataURIs[0] = "";
@@ -317,8 +304,7 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
                 minVotingDuration: MIN_VOTING_DURATION,
                 maxVotingDuration: MAX_VOTING_DURATION,
                 proposalValidationStrategy: Strategy({
-                    addr: pv,
-                    params: abi.encode(uint256(PROPOSER_THRESHOLD), d.seatToken)
+                    addr: pv, params: abi.encode(uint256(PROPOSER_THRESHOLD), d.seatToken)
                 }),
                 proposalValidationStrategyMetadataURI: "",
                 daoURI: "",
@@ -346,9 +332,15 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         {
             SeatToken st = SeatToken(d.seatToken);
             st.grantRole(st.MINTER_ROLE(), d.bondingTranche);
+            // Test-only: also grant MINTER_ROLE to this test contract so per-test setUps can
+            // mint seats directly without routing through BondingTranche.purchase. Must happen
+            // before DEFAULT_ADMIN_ROLE is renounced — under the production access model
+            // (see PENDeploymentScriptBase._finalizeAccess) roles cannot be granted after.
+            st.grantRole(st.MINTER_ROLE(), address(this));
             st.grantRole(st.BURNER_ROLE(), d.bondingTranche);
             st.grantRole(st.ACTIVITY_ROLE(), d.penTxAuthenticator);
-            st.grantRole(st.DEFAULT_ADMIN_ROLE(), d.safe);
+            // SeatToken.DEFAULT_ADMIN_ROLE intentionally left unheld — see _finalizeAccess
+            // comment in script/PENDeploymentScriptBase.s.sol.
             st.renounceRole(st.DEFAULT_ADMIN_ROLE(), address(this));
         }
         {
@@ -409,11 +401,11 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         uint256 proposalId = _propose(alice, payload);
         _advance(2);
 
-        _vote(alice, proposalId, Choice.For);    // +2
-        _vote(bob, proposalId, Choice.For);      // +1  → 3 For
-        _vote(charlie, proposalId, Choice.For);  // +1  → 4 For
-        _vote(dan, proposalId, Choice.Against);  // +1  → 1 Against
-        _vote(eve, proposalId, Choice.Against);  // +1  → 2 Against
+        _vote(alice, proposalId, Choice.For); // +2
+        _vote(bob, proposalId, Choice.For); // +1  → 3 For
+        _vote(charlie, proposalId, Choice.For); // +1  → 4 For
+        _vote(dan, proposalId, Choice.Against); // +1  → 1 Against
+        _vote(eve, proposalId, Choice.Against); // +1  → 2 Against
 
         // votesFor=4 > votesAgainst=2; quorum 4+0=4 >= 3 → VotingPeriodAccepted
         _executeProposal(proposalId, payload);
@@ -426,19 +418,17 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         uint256 proposalId = _propose(alice, payload);
         _advance(2);
 
-        _vote(alice, proposalId, Choice.For);    // +2 → 2 For
-        _vote(bob, proposalId, Choice.For);      // +1 → 3 For
+        _vote(alice, proposalId, Choice.For); // +2 → 2 For
+        _vote(bob, proposalId, Choice.For); // +1 → 3 For
         _vote(charlie, proposalId, Choice.Against); // +1 → 1 Against
-        _vote(dan, proposalId, Choice.Against);  // +1 → 2 Against
-        _vote(eve, proposalId, Choice.Against);  // +1 → 3 Against
+        _vote(dan, proposalId, Choice.Against); // +1 → 2 Against
+        _vote(eve, proposalId, Choice.Against); // +1 → 3 Against
 
         // Advance past maxVotingDuration to force Rejected status (not VotingPeriodAccepted)
         _advance(MAX_VOTING_DURATION);
 
         // InvalidProposalStatus(Rejected=5) — enum uint8 value 5
-        vm.expectRevert(
-            abi.encodeWithSelector(bytes4(keccak256("InvalidProposalStatus(uint8)")), uint8(5))
-        );
+        vm.expectRevert(abi.encodeWithSelector(bytes4(keccak256("InvalidProposalStatus(uint8)")), uint8(5)));
         _executeProposal(proposalId, payload);
     }
 
@@ -452,9 +442,7 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
 
         _advance(MAX_VOTING_DURATION);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(bytes4(keccak256("InvalidProposalStatus(uint8)")), uint8(5))
-        );
+        vm.expectRevert(abi.encodeWithSelector(bytes4(keccak256("InvalidProposalStatus(uint8)")), uint8(5)));
         _executeProposal(proposalId, payload);
     }
 
@@ -463,12 +451,8 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         bytes memory payload = _ethTransferPayload(grantee, 0);
 
         IndexedStrategy[] memory userStrats = _defaultUserStrategies();
-        bytes memory data = abi.encode(
-            frank,
-            "",
-            Strategy({addr: _activeExecStrategy(), params: payload}),
-            abi.encode(userStrats)
-        );
+        bytes memory data =
+            abi.encode(frank, "", Strategy({addr: _activeExecStrategy(), params: payload}), abi.encode(userStrats));
 
         vm.prank(frank);
         vm.expectRevert(bytes4(keccak256("FailedToPassProposalValidation()")));
@@ -550,17 +534,11 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         // We're still at block B, so block.number = B < B+1 = startBlockNumber. ✓
         uint48 activityBeforeUpdate = SeatToken(sys.seatToken).lastActivityAt(alice);
 
-        bytes memory updateData = abi.encode(
-            alice,
-            proposalId,
-            Strategy({addr: _activeExecStrategy(), params: updatedPayload}),
-            ""
-        );
+        bytes memory updateData =
+            abi.encode(alice, proposalId, Strategy({addr: _activeExecStrategy(), params: updatedPayload}), "");
 
         vm.prank(alice);
-        PENTxAuthenticator(sys.penTxAuthenticator).authenticate(
-            sys.space, UPDATE_PROPOSAL_SELECTOR, updateData
-        );
+        PENTxAuthenticator(sys.penTxAuthenticator).authenticate(sys.space, UPDATE_PROPOSAL_SELECTOR, updateData);
 
         uint48 activityAfterUpdate = SeatToken(sys.seatToken).lastActivityAt(alice);
         // In the same block, lastActivityAt is refreshed (>= value before update call)
@@ -659,9 +637,7 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         // T_vote ≈ block.timestamp after warmup (≈ 7). 7+365d = 31536007.
         // Warp from current timestamp to 3+365d+1 = 31536004.
         uint256 inactivityTarget = 3 + uint256(365 days) + 1;
-        uint256 warpAmount = inactivityTarget > block.timestamp
-            ? inactivityTarget - block.timestamp
-            : 0;
+        uint256 warpAmount = inactivityTarget > block.timestamp ? inactivityTarget - block.timestamp : 0;
         _advance(warpAmount);
 
         assertTrue(SeatToken(sys.seatToken).isInactive(mInactive));
@@ -688,11 +664,11 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
         PrincipalManager pm = PrincipalManager(sys.principalManager);
         BondingTranche bt = BondingTranche(sys.bondingTranche);
 
-        // SeatToken
-        assertTrue(st.hasRole(st.DEFAULT_ADMIN_ROLE(), sys.safe));
-        assertFalse(st.hasRole(st.DEFAULT_ADMIN_ROLE(), address(this))); // deployer renounced
+        // SeatToken — DEFAULT_ADMIN_ROLE intentionally unheld; roles are immutable post-deploy.
+        assertFalse(st.hasRole(st.DEFAULT_ADMIN_ROLE(), sys.safe));
+        assertFalse(st.hasRole(st.DEFAULT_ADMIN_ROLE(), address(this)));
         assertTrue(st.hasRole(st.MINTER_ROLE(), sys.bondingTranche));
-        assertTrue(st.hasRole(st.MINTER_ROLE(), address(this))); // granted in setUp for test minting
+        assertTrue(st.hasRole(st.MINTER_ROLE(), address(this))); // test-only minter; granted pre-renounce
         assertTrue(st.hasRole(st.BURNER_ROLE(), sys.bondingTranche));
         assertTrue(st.hasRole(st.ACTIVITY_ROLE(), sys.penTxAuthenticator));
 
@@ -716,5 +692,37 @@ contract EndToEndProposalTest is Test, PENDeploymentHelper {
 
         // Space
         assertEq(ISpaceExec(sys.space).owner(), sys.safe);
+    }
+
+    // The Safe holds DEFAULT_ADMIN_ROLE on PrincipalManager and BondingTranche (needed for
+    // executeFunding, asset migration, extendTranches, etc.) but NOT on SeatToken — so even
+    // a captured governance majority cannot reroute MINTER_ROLE or BURNER_ROLE to dilute or
+    // confiscate seats.
+    function test_seatTokenRoles_areFrozen_safeCannotReroute() public {
+        SeatToken st = SeatToken(sys.seatToken);
+        address attacker = makeAddr("attacker");
+        // Resolve role IDs outside the prank — st.MINTER_ROLE() is an external call that
+        // would otherwise consume a single-use vm.prank before grantRole is reached.
+        bytes32 minterRole = st.MINTER_ROLE();
+        bytes32 burnerRole = st.BURNER_ROLE();
+
+        // The Safe (admin on every other contract) cannot grant MINTER on the seat token.
+        vm.prank(sys.safe);
+        vm.expectRevert();
+        st.grantRole(minterRole, attacker);
+
+        // …or BURNER.
+        vm.prank(sys.safe);
+        vm.expectRevert();
+        st.grantRole(burnerRole, attacker);
+
+        // …or revoke the existing grants to BondingTranche.
+        vm.prank(sys.safe);
+        vm.expectRevert();
+        st.revokeRole(minterRole, sys.bondingTranche);
+
+        vm.prank(sys.safe);
+        vm.expectRevert();
+        st.revokeRole(burnerRole, sys.bondingTranche);
     }
 }

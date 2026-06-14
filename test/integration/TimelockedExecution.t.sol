@@ -7,8 +7,7 @@ import {Safe} from "@gnosis.pm/safe-contracts/contracts/Safe.sol";
 import {SeatToken} from "../../src/SeatToken.sol";
 import {BondingTranche} from "../../src/BondingTranche.sol";
 import {PrincipalManager} from "../../src/PrincipalManager.sol";
-import {TimelockExecutionStrategy} from
-    "@snapshot-x/execution-strategies/timelocks/TimelockExecutionStrategy.sol";
+import {TimelockExecutionStrategy} from "@snapshot-x/execution-strategies/timelocks/TimelockExecutionStrategy.sol";
 import {Choice, MetaTransaction} from "@snapshot-x/types.sol";
 
 import {ISpaceManager, IOwnable} from "../../script/PENDeploymentScriptBase.s.sol";
@@ -37,12 +36,9 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         // executes MetaTransactions from its own context, so it must hold the ETH itself.
         vm.deal(sys.timelockExecutionStrategy, 1 ether);
 
-        // vm.startPrank prevents st.MINTER_ROLE() from consuming a single-use vm.prank
-        // before grantRole is reached (argument evaluation happens first).
+        // MINTER_ROLE for this test contract was granted during _deploySpaceAndFinalize,
+        // before DEFAULT_ADMIN_ROLE on SeatToken was renounced. See that helper for context.
         SeatToken st = SeatToken(sys.seatToken);
-        vm.startPrank(sys.safe);
-        st.grantRole(st.MINTER_ROLE(), address(this));
-        vm.stopPrank();
 
         st.mint(alice, 2);
         st.mint(bob, 1);
@@ -83,9 +79,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
 
         _advance(MAX_VOTING_DURATION);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(bytes4(keccak256("InvalidProposalStatus(uint8)")), uint8(5))
-        );
+        vm.expectRevert(abi.encodeWithSelector(bytes4(keccak256("InvalidProposalStatus(uint8)")), uint8(5)));
         ISpaceExec(sys.space).execute(proposalId, payload);
     }
 
@@ -98,9 +92,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
 
         _advance(MAX_VOTING_DURATION);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(bytes4(keccak256("InvalidProposalStatus(uint8)")), uint8(5))
-        );
+        vm.expectRevert(abi.encodeWithSelector(bytes4(keccak256("InvalidProposalStatus(uint8)")), uint8(5)));
         ISpaceExec(sys.space).execute(proposalId, payload);
     }
 
@@ -149,11 +141,11 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         PrincipalManager pm = PrincipalManager(sys.principalManager);
         BondingTranche bt = BondingTranche(sys.bondingTranche);
 
-        // SeatToken
-        assertTrue(st.hasRole(st.DEFAULT_ADMIN_ROLE(), sys.safe));
+        // SeatToken — DEFAULT_ADMIN_ROLE intentionally unheld; roles are immutable post-deploy.
+        assertFalse(st.hasRole(st.DEFAULT_ADMIN_ROLE(), sys.safe));
         assertFalse(st.hasRole(st.DEFAULT_ADMIN_ROLE(), address(this)));
         assertTrue(st.hasRole(st.MINTER_ROLE(), sys.bondingTranche));
-        assertTrue(st.hasRole(st.MINTER_ROLE(), address(this)));
+        assertTrue(st.hasRole(st.MINTER_ROLE(), address(this))); // test-only minter; granted pre-renounce
         assertTrue(st.hasRole(st.BURNER_ROLE(), sys.bondingTranche));
         assertTrue(st.hasRole(st.ACTIVITY_ROLE(), sys.penTxAuthenticator));
 
@@ -191,20 +183,14 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
     // Pass a proposal, queue it in the timelock, warp past the delay, execute.
     function test_executeViaTimelock_succeedsAfterDelay() public {
         MetaTransaction[] memory txs = new MetaTransaction[](1);
-        txs[0] = MetaTransaction({
-            to: grantee,
-            value: 0.1 ether,
-            data: "",
-            operation: Enum.Operation.Call,
-            salt: 0
-        });
+        txs[0] = MetaTransaction({to: grantee, value: 0.1 ether, data: "", operation: Enum.Operation.Call, salt: 0});
         bytes memory payload = abi.encode(txs);
 
         uint256 proposalId = _propose(alice, payload);
         _advance(2);
 
-        _vote(alice, proposalId, Choice.For);   // 2 seats
-        _vote(bob, proposalId, Choice.For);     // 1 → 3 ≥ quorum
+        _vote(alice, proposalId, Choice.For); // 2 seats
+        _vote(bob, proposalId, Choice.For); // 1 → 3 ≥ quorum
         _vote(charlie, proposalId, Choice.For); // 1 → 4
 
         // Space.execute → TimelockExecutionStrategy.execute → queues the payload hash
@@ -226,13 +212,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
     // timelock delay elapses reverts with TimelockDelayNotMet.
     function test_executeViaTimelock_revertsBeforeDelay() public {
         MetaTransaction[] memory txs = new MetaTransaction[](1);
-        txs[0] = MetaTransaction({
-            to: grantee,
-            value: 0.1 ether,
-            data: "",
-            operation: Enum.Operation.Call,
-            salt: 0
-        });
+        txs[0] = MetaTransaction({to: grantee, value: 0.1 ether, data: "", operation: Enum.Operation.Call, salt: 0});
         bytes memory payload = abi.encode(txs);
 
         uint256 proposalId = _propose(alice, payload);

@@ -9,7 +9,6 @@ import {ISeatToken} from "../interfaces/ISeatToken.sol";
 /// @notice PENTxAuthenticator that records seat activity after a successful authenticated call.
 /// @dev Holds `ACTIVITY_ROLE` on the seat token. Skips activity recording for zero-balance actors
 ///      to avoid reverting on SeatToken._recordActivity's NotSeatHolder check.
-
 contract PENTxAuthenticator is Authenticator {
     error InvalidFunctionSelector();
     error InvalidMessageSender();

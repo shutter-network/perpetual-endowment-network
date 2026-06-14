@@ -215,7 +215,7 @@ bytes4 VOTE_SELECTOR = bytes4(keccak256("vote(address,uint256,uint8,(uint8,bytes
 ```solidity
 IndexedStrategy[] memory userStrategies = new IndexedStrategy[](1);
 userStrategies[0] = IndexedStrategy({ index: 0, params: "" });
-// index 0 = SeatVotingStrategy, registered at Space initialisation
+// index 0 = stock OZVotesVotingStrategy, registered at Space initialisation
 // params = empty; the strategy reads SeatToken address from its own registered params
 
 bytes memory data = abi.encode(
