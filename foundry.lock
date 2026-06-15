@@ -1,0 +1,26 @@
+{
+  "lib/account-abstraction": {
+    "rev": "1c6b669d0eea734e09a87e095ba15e076151718a"
+  },
+  "lib/forge-std": {
+    "rev": "f5495c9b993bfc6e79dd52adfdcb7dac0a1da918"
+  },
+  "lib/openzeppelin-contracts": {
+    "rev": "45f032d1bcf1a88b7bc90154d7eef76c87bf9d45"
+  },
+  "lib/openzeppelin-contracts-upgradeable": {
+    "rev": "60b305a8f3ff0c7688f02ac470417b6bbf1c4d27"
+  },
+  "lib/prb-math": {
+    "rev": "82e5ed5561d0a1c43a3a59edbf4291c8de26479e"
+  },
+  "lib/safe-smart-account": {
+    "rev": "bf943f80fec5ac647159d26161446ac5d716a294"
+  },
+  "lib/sx-evm": {
+    "rev": "c768f7a7c93ed79c1e63163762ddff40e9180f5f"
+  },
+  "lib/zodiac": {
+    "rev": "36d0117b13d82bdedeed2fdafecf33ea01d208d9"
+  }
+}

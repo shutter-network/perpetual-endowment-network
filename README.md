@@ -1,6 +1,6 @@
 # PEN Contracts
 
-PEN is a minimal on-chain core for a seat-based membership treasury: members buy non-transferable seats at a tranche-based price, the treasury deploys principal into an ERC-4626 vault, and yield is paid out to recipients selected off-chain via Snapshot ranked-choice voting and ratified on-chain via Decent Azorius (YES/NO).
+PEN is a minimal on-chain core for a seat-based membership treasury: members buy non-transferable seats at a tranche-based price, the treasury deploys principal into an ERC-4626 vault, and yield is paid out to recipients selected off-chain via Snapshot ranked-choice voting and ratified on-chain via Snapshot X / EVM (YES/NO).
 
 ## Table of Contents
 
@@ -25,9 +25,9 @@ PEN is a minimal on-chain core for a seat-based membership treasury: members buy
 PEN splits governance into two layers:
 
 - **Off-chain (Snapshot, ranked-choice):** members propose candidate slates (recipients + amounts, plus "none of the above") and select a single *winning slate* via ranked-choice voting.
-- **On-chain (Decent Azorius, YES/NO):** a member submits an Azorius proposal encoding the winning slate as executable transactions; seat holders vote YES/NO under `PENStrategyV1` (a wrapper over Decent's `StrategyV1`); after the timelock, the proposal executes.
+- **On-chain (Snapshot X / EVM, YES/NO):** a member submits a proposal encoding the winning slate as executable transactions via `PENTxAuthenticator`; seat holders vote using the stock `OZVotesVotingStrategy` (backed by `SeatToken.getPastVotes`); after the optional timelock, the proposal executes through `AvatarExecutionStrategy` → Safe.
 
-For PEN treasury batch payouts, the canonical execution call is `PrincipalManager.executeFunding(recipients, amounts)` — a single batched primitive that is materially cheaper under Azorius execution than `withdraw + N transfers`.
+For PEN treasury batch payouts, the canonical execution call is `PrincipalManager.executeFunding(recipients, amounts)` — a single batched primitive that is materially cheaper under Snapshot X execution than `withdraw + N transfers`.
 
 Further reading: [`docs/flows.md`](docs/flows.md), [`docs/pen-operator-guide.md`](docs/pen-operator-guide.md).
 
@@ -43,9 +43,10 @@ Further reading: [`docs/flows.md`](docs/flows.md), [`docs/pen-operator-guide.md`
 
 | Contract | Role | Holder / Purpose |
 | --- | --- | --- |
-| `SeatToken` | `MINTER_ROLE` | `BondingTranche` (mint on purchase) |
-| `SeatToken` | `BURNER_ROLE` | `BondingTranche` (burn on refund/reclaim) |
-| `SeatToken` | `ACTIVITY_ROLE` | `PENStrategyV1` (refresh activity on vote) |
+| `SeatToken` | `DEFAULT_ADMIN_ROLE` | **Unheld** — renounced at deploy. No party can reroute the roles below. |
+| `SeatToken` | `MINTER_ROLE` | `BondingTranche` (mint on purchase) — frozen at deploy |
+| `SeatToken` | `BURNER_ROLE` | `BondingTranche` (burn on refund/reclaim) — frozen at deploy |
+| `SeatToken` | `ACTIVITY_ROLE` | `PENTxAuthenticator` (refresh activity on propose/vote) — frozen at deploy |
 | `BondingTranche` | `DEFAULT_ADMIN_ROLE` | Governance Safe |
 | `BondingTranche` | `RECLAIMER_ROLE` | Authorized reclaimer |
 | `PrincipalManager` | `DEFAULT_ADMIN_ROLE` | Governance Safe |
@@ -56,6 +57,19 @@ Further reading: [`docs/flows.md`](docs/flows.md), [`docs/pen-operator-guide.md`
 - Purchase proceeds land in `PrincipalManager`; excess over the configured liquid reserve is auto-deposited into `principalVault` (ERC-4626).
 - `accountedPrincipal` tracks the protocol's principal obligation (created by seat sales, reduced by refunds).
 - `availableYield = max(totalManagedAssets − accountedPrincipal, 0)`.
+
+## PEN → PEN migration
+
+PEN's core parameters — payment asset, refund price, tranche schedule, supply cap, inactivity period — are immutable in the deployed contracts. When governance needs to change any of them, the path is to **deploy a new PEN and migrate the treasury into it**.
+
+Two admin primitives on `PrincipalManager` support this, both gated by the Safe's `DEFAULT_ADMIN_ROLE`:
+
+- `pause()` / `unpause()` — freezes user-state-changing flows (`purchase`, `refund`, `reclaim`) on the old deployment without disturbing admin operations.
+- `withdraw(token, to, amount)` — moves any ERC-20 balance out of `PrincipalManager` to a chosen receiver. Callable any time; does not adjust `accountedPrincipal`.
+
+A migration ceremony typically looks like: deploy the new PEN → pause the old `PrincipalManager` → drain its principal vault to liquid → `withdraw` the treasury to the Safe → (if migrating to a different asset, swap externally) → seed the new `PrincipalManager` → governance on the new PEN reissues seats to original holders.
+
+The most common reason to migrate is **payment-asset migration** (e.g. USDC → USDT), but the same procedure applies to any change that requires fresh contracts. See `docs/pen-migration.md` for the step-by-step runbook and risks.
 
 ## Setup & Deployment
 
@@ -103,8 +117,8 @@ The deploy script internally:
 1. derives the deployer address and current nonce,
 2. deterministically predicts every contract address from that sequence + `DEPLOYMENT_SALT`,
 3. deploys all contracts in the predicted order,
-4. creates the Safe with Azorius enabled during `Safe.setup`,
-5. initializes governance and transfers all admin / executor / reclaimer control to the Safe.
+4. creates the Safe with the Snapshot X `AvatarExecutionStrategy` module enabled during `Safe.setup`,
+5. initializes the Snapshot X Space and transfers all admin / executor / reclaimer control to the Safe.
 
 #### Step 1 — Load the environment
 
@@ -207,9 +221,9 @@ Reclaims also reduce total supply, moving pricing backward.
 ### Yield Funding
 
 1. Off-chain (Snapshot, ranked-choice): community selects a winning slate (recipients + amounts).
-2. On-chain (Azorius): a member creates a proposal encoding `PrincipalManager.executeFunding(recipients, amounts)`.
-3. Seat holders vote YES/NO.
-4. After the timelock, the proposal executes: `PrincipalManager` pays from liquid assets first, withdrawing the shortfall from `principalVault` as needed.
+2. On-chain (Snapshot X / EVM): a member creates a proposal encoding `PrincipalManager.executeFunding(recipients, amounts)` via `PENTxAuthenticator`.
+3. Seat holders vote YES/NO. Simple majority (For > Against) with quorum met makes the proposal executable.
+4. After the optional timelock, the proposal executes via `AvatarExecutionStrategy` → Safe: `PrincipalManager` pays from liquid assets first, withdrawing the shortfall from `principalVault` as needed.
 5. `accountedPrincipal` is unchanged — funding pays from yield, not from the principal obligation.
 
 ## Operations

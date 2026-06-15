@@ -2,16 +2,33 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+fs_permissions = [{ access = "write", path = "deployments/" }]
 auto_detect_solc = true
 optimizer = true
 remappings = [
     "@account-abstraction/contracts/=lib/account-abstraction/contracts/",
-    "@gnosis-guild/zodiac/=lib/zodiac/",
+    "@zodiac/=lib/zodiac/contracts/",
     "@gnosis.pm/safe-contracts/contracts/=lib/safe-smart-account/contracts/",
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
     "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
     "@prb/math/=lib/prb-math/src/",
-    "decent-contracts/=lib/decent-contracts/",
+    "@snapshot-x/=lib/sx-evm/src/",
+    # Contextual remappings: sx-evm uses OZ v4 (no-arg __Ownable_init); our project uses
+    # v5. Each must see its own version.
+    "lib/sx-evm/:@openzeppelin/contracts-upgradeable/=lib/sx-evm/lib/openzeppelin-contracts-upgradeable/contracts/",
+    "lib/sx-evm/:@openzeppelin/contracts/=lib/sx-evm/lib/openzeppelin-contracts/contracts/",
 ]
+
+# Suppress third-party library warnings we cannot fix:
+ignored_error_codes = [2424, 9207, 5574, 3860]
+
+# lint_on_build is disabled because solar (Foundry's linter) does not honour contextual
+# remappings. lib/sx-evm/src/types.sol imports "src/interfaces/IExecutionStrategy.sol"
+# via a bare path; solar cannot resolve it despite the lib/sx-evm/:src/ remapping.
+# Use `forge lint src/` to lint PEN's own contracts without hitting the library issue.
+# TODO(upstream-fix): once snapshot-labs/sx-evm replaces bare "src/..." imports with
+# relative imports, set lint_on_build = true and remove this comment.
+[lint]
+lint_on_build = false
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

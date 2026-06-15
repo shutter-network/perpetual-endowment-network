@@ -34,7 +34,7 @@ contract SeatTokenTest is Test {
     }
 
     function test_MintAutoDelegatesAndTracksVotes() public {
-        uint256 mintTimestamp = block.timestamp;
+        uint256 mintBlock = block.number;
 
         vm.prank(minter);
         seatToken.mint(alice, 3);
@@ -44,9 +44,9 @@ contract SeatTokenTest is Test {
         assertEq(seatToken.delegates(alice), alice);
         assertEq(seatToken.lastActivityAt(alice), block.timestamp);
 
-        vm.warp(mintTimestamp + 1);
-        assertEq(seatToken.getPastVotes(alice, mintTimestamp), 3);
-        assertEq(seatToken.getPastTotalSupply(mintTimestamp), 3);
+        vm.roll(mintBlock + 1);
+        assertEq(seatToken.getPastVotes(alice, mintBlock), 3);
+        assertEq(seatToken.getPastTotalSupply(mintBlock), 3);
     }
 
     function test_CannotTransferOrApprove() public {

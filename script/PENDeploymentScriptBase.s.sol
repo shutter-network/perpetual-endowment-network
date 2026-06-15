@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.30;
 
-import {Clones} from "openzeppelin-contracts/contracts/proxy/Clones.sol";
 import {Create2} from "openzeppelin-contracts/contracts/utils/Create2.sol";
 import {RLP} from "openzeppelin-contracts/contracts/utils/RLP.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
@@ -12,23 +11,42 @@ import {console2} from "forge-std/console2.sol";
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
 import {SeatToken} from "../src/SeatToken.sol";
-import {PENStrategyV1} from "../src/governance/PENStrategyV1.sol";
+import {PENTxAuthenticator} from "../src/governance/PENTxAuthenticator.sol";
+import {ISeatToken} from "../src/interfaces/ISeatToken.sol";
 import {PENSafeBootstrap} from "../src/deployment/PENSafeBootstrap.sol";
 
-import {IVotingTypes} from "decent-contracts/contracts/interfaces/decent/deployables/IVotingTypes.sol";
-import {ModuleAzoriusV1} from "decent-contracts/contracts/deployables/modules/ModuleAzoriusV1.sol";
-import {
-    ProposerAdapterERC20V1
-} from "decent-contracts/contracts/deployables/strategies/proposer-adapters/ProposerAdapterERC20V1.sol";
-import {
-    VoteTrackerERC20V1
-} from "decent-contracts/contracts/deployables/strategies/vote-trackers/VoteTrackerERC20V1.sol";
-import {
-    VotingWeightERC20V1
-} from "decent-contracts/contracts/deployables/strategies/voting-weight/VotingWeightERC20V1.sol";
+import {Strategy, InitializeCalldata} from "@snapshot-x/types.sol";
+import {IProxyFactory} from "@snapshot-x/interfaces/IProxyFactory.sol";
+import {AvatarExecutionStrategy} from "@snapshot-x/execution-strategies/AvatarExecutionStrategy.sol";
+import {TimelockExecutionStrategy} from "@snapshot-x/execution-strategies/timelocks/TimelockExecutionStrategy.sol";
+
 import {Safe} from "@gnosis.pm/safe-contracts/contracts/Safe.sol";
 import {SafeProxy} from "@gnosis.pm/safe-contracts/contracts/proxies/SafeProxy.sol";
 import {SafeProxyFactory} from "@gnosis.pm/safe-contracts/contracts/proxies/SafeProxyFactory.sol";
+
+/// @dev Minimal interface for SpaceManager on execution strategies.
+interface ISpaceManager {
+    function enableSpace(address space) external;
+    function isSpaceEnabled(address space) external view returns (uint256);
+}
+
+/// @dev Minimal interface for OwnableUpgradeable on execution strategies.
+interface IOwnable {
+    function transferOwnership(address newOwner) external;
+    function owner() external view returns (address);
+}
+
+// Minimal Space initializer declared locally rather than imported from ISpaceActions.
+// ISpaceActions.sol uses a bare "src/types.sol" import that solc assigns a different
+// source unit ID than our remapped import, causing abi.encodeCall to reject the type.
+// Declaring the interface against the already imported InitializeCalldata eliminates the conflict.
+// TODO(upstream-fix): once snapshot-labs/sx-evm replaces bare "src/types.sol" imports
+// with relative imports, delete this local stub and replace the abi.encodeCall below with:
+//   import {ISpaceActions} from "@snapshot-x/interfaces/space/ISpaceActions.sol";
+//   abi.encodeCall(ISpaceActions.initialize, (spaceInit))
+interface ISpace {
+    function initialize(InitializeCalldata calldata input) external;
+}
 
 abstract contract PENDeploymentHelper {
     error UnexpectedDeploymentAddress(bytes32 component, address expected, address actual);
@@ -47,14 +65,19 @@ abstract contract PENDeploymentHelper {
     }
 
     struct GovernanceConfig {
-        uint32 votingPeriod;
-        uint32 timelockPeriod;
-        uint32 executionPeriod;
-        uint256 quorumThreshold;
-        uint256 basisNumerator;
-        uint256 proposerThreshold;
-        uint256 votingWeightPerToken;
-        address lightAccountFactory;
+        address sxProxyFactory;
+        address sxMasterSpace;
+        address sxAvatarImpl;
+        address sxTimelockImpl;
+        address sxPropositionPowerValidation;
+        address sxOzVotesStrategy;
+        uint32 votingDelay;
+        uint32 minVotingDuration;
+        uint32 maxVotingDuration;
+        uint256 avatarQuorum;
+        uint256 proposerSeatThreshold;
+        bool timelockEnabled; // Timelock (optional — set timelockEnabled = false to use AvatarExecutionStrategy directly)
+        uint32 timelockDelay;
     }
 
     struct DeploymentConfig {
@@ -70,38 +93,55 @@ abstract contract PENDeploymentHelper {
         address seatToken;
         address principalManager;
         address bondingTranche;
-        address strategy;
-        address azorius;
-        address votingWeight;
-        address voteTracker;
-        address proposerAdapter;
+        address penTxAuthenticator;
+        address space; // Snapshot X Space, cloned from sxMasterSpace
+        address executionStrategy; // AvatarExecutionStrategy proxy
+        address timelockExecutionStrategy; // TimelockExecutionStrategy proxy; 0x0 if disabled
     }
+
+    // ── Address prediction ─────────────────────────────────────────────────────────────
 
     function previewDeployment(
         address deployer_,
         uint256 startingNonce_,
         bytes32 salt_,
         DeploymentConfig memory config_
-    ) public pure returns (DeploymentAddresses memory predicted_) {
+    ) public view returns (DeploymentAddresses memory predicted_) {
         uint256 nextNonce = startingNonce_;
 
         predicted_.safeSingleton = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.safeProxyFactory = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.safeBootstrap = _computeCreateAddress(deployer_, nextNonce++);
 
-        nextNonce += 5;
+        // Each ProxyFactory.deployProxy call is a deployer tx (advances nonce), but the
+        // proxy address is CREATE2-based (salt = keccak256(deployer, saltNonce)).
+        nextNonce++; // avatar proxy tx
+        predicted_.executionStrategy =
+            _computeProxyAddress(config_.governance.sxProxyFactory, config_.governance.sxAvatarImpl, deployer_, 0);
 
-        predicted_.strategy = _computeCreateAddress(deployer_, nextNonce++);
-        predicted_.votingWeight = _computeCreateAddress(deployer_, nextNonce++);
-        predicted_.voteTracker = _computeCreateAddress(deployer_, nextNonce++);
-        predicted_.proposerAdapter = _computeCreateAddress(deployer_, nextNonce++);
-        predicted_.azorius = _computeCreateAddress(deployer_, nextNonce++);
+        if (config_.governance.timelockEnabled) {
+            nextNonce++; // timelock proxy tx
+            predicted_.timelockExecutionStrategy = _computeProxyAddress(
+                config_.governance.sxProxyFactory, config_.governance.sxTimelockImpl, deployer_, 1
+            );
+        }
+
+        nextNonce++; // safeProxyFactory.createProxyWithNonce tx (Safe uses CREATE2 internally)
+        predicted_.safe = _predictSafeAddress(predicted_, salt_);
+
         predicted_.seatToken = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.principalManager = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.bondingTranche = _computeCreateAddress(deployer_, nextNonce++);
+        predicted_.penTxAuthenticator = _computeCreateAddress(deployer_, nextNonce++);
 
-        predicted_.safe = _predictSafeAddress(predicted_, salt_);
+        uint256 spaceSaltNonce = config_.governance.timelockEnabled ? 2 : 1;
+        nextNonce++; // space proxy tx
+        predicted_.space = _computeProxyAddress(
+            config_.governance.sxProxyFactory, config_.governance.sxMasterSpace, deployer_, spaceSaltNonce
+        );
     }
+
+    // ── Deployment ─────────────────────────────────────────────────────────────────────
 
     function _deploySystem(
         DeploymentAddresses memory expected_,
@@ -118,59 +158,76 @@ abstract contract PENDeploymentHelper {
         deployed_.safeBootstrap = address(new PENSafeBootstrap());
         _assertDeployedAddress("SAFE_BOOTSTRAP", expected_.safeBootstrap, deployed_.safeBootstrap);
 
-        (
-            deployed_.strategy,
-            deployed_.votingWeight,
-            deployed_.voteTracker,
-            deployed_.proposerAdapter,
-            deployed_.azorius
-        ) = _deployGovernanceClones(expected_);
+        // Steps 4–5: execution strategy proxies (avatar + optional timelock).
+        // Voting power uses the canonical stock `OZVotesVotingStrategy` at
+        // `config_.governance.sxOzVotesStrategy` — no PEN-specific voting strategy is deployed.
+        (deployed_.executionStrategy, deployed_.timelockExecutionStrategy) =
+            _deployGovernanceContracts(expected_, config_, bootstrapAuthority_);
 
-        (deployed_.seatToken, deployed_.principalManager, deployed_.bondingTranche) =
-            _deployCoreContracts(expected_, config_, bootstrapAuthority_);
-
+        // Step 7: Safe proxy (owners = [module], module enabled via delegatecall to PENSafeBootstrap)
         deployed_.safe = address(
             SafeProxyFactory(deployed_.safeProxyFactory)
                 .createProxyWithNonce(deployed_.safeSingleton, _safeInitializer(expected_), uint256(salt_))
         );
         _assertDeployedAddress("SAFE", expected_.safe, deployed_.safe);
 
-        _initializeGovernance(expected_, config_);
-        _finalizeAccess(expected_, bootstrapAuthority_);
+        // Steps 8–10: Core contracts
+        (deployed_.seatToken, deployed_.principalManager, deployed_.bondingTranche) =
+            _deployCoreContracts(expected_, config_, bootstrapAuthority_);
+
+        // Step 11: PENTxAuthenticator
+        deployed_.penTxAuthenticator = address(new PENTxAuthenticator(ISeatToken(deployed_.seatToken), expected_.space));
+        _assertDeployedAddress("PEN_TX_AUTHENTICATOR", expected_.penTxAuthenticator, deployed_.penTxAuthenticator);
+
+        // Step 12: Space proxy
+        deployed_.space = _deploySpace(deployed_, config_, bootstrapAuthority_);
+        _assertDeployedAddress("SPACE", expected_.space, deployed_.space);
+
+        // Steps 13–15: Wire whitelists, transfer ownership, finalise roles
+        _initializeGovernance(deployed_);
+        _finalizeAccess(deployed_, bootstrapAuthority_);
 
         return expected_;
     }
 
-    function _deployGovernanceClones(DeploymentAddresses memory expected_)
-        internal
-        returns (
-            address strategy_,
-            address votingWeight_,
-            address voteTracker_,
-            address proposerAdapter_,
-            address azorius_
-        )
-    {
-        address strategyImplementation = address(new PENStrategyV1());
-        address votingWeightImplementation = address(new VotingWeightERC20V1());
-        address voteTrackerImplementation = address(new VoteTrackerERC20V1());
-        address proposerAdapterImplementation = address(new ProposerAdapterERC20V1());
-        address azoriusImplementation = address(new ModuleAzoriusV1());
+    function _deployGovernanceContracts(
+        DeploymentAddresses memory expected_,
+        DeploymentConfig memory config_,
+        address deployer_
+    ) internal returns (address executionStrategy_, address timelockExecutionStrategy_) {
+        IProxyFactory proxyFactory = IProxyFactory(config_.governance.sxProxyFactory);
 
-        strategy_ = Clones.clone(strategyImplementation);
-        _assertDeployedAddress("STRATEGY", expected_.strategy, strategy_);
+        // AvatarExecutionStrategy: owner = deployer (transferred to Safe in _initializeGovernance),
+        // target = Safe, no spaces yet (added via enableSpace after Space is deployed).
+        bytes memory avatarInitParams =
+            abi.encode(deployer_, expected_.safe, new address[](0), config_.governance.avatarQuorum);
+        proxyFactory.deployProxy(
+            config_.governance.sxAvatarImpl, abi.encodeCall(AvatarExecutionStrategy.setUp, (avatarInitParams)), 0
+        );
+        executionStrategy_ =
+            _computeProxyAddress(config_.governance.sxProxyFactory, config_.governance.sxAvatarImpl, deployer_, 0);
+        _assertDeployedAddress("EXECUTION_STRATEGY", expected_.executionStrategy, executionStrategy_);
 
-        votingWeight_ = Clones.clone(votingWeightImplementation);
-        _assertDeployedAddress("VOTING_WEIGHT", expected_.votingWeight, votingWeight_);
-
-        voteTracker_ = Clones.clone(voteTrackerImplementation);
-        _assertDeployedAddress("VOTE_TRACKER", expected_.voteTracker, voteTracker_);
-
-        proposerAdapter_ = Clones.clone(proposerAdapterImplementation);
-        _assertDeployedAddress("PROPOSER_ADAPTER", expected_.proposerAdapter, proposerAdapter_);
-
-        azorius_ = Clones.clone(azoriusImplementation);
-        _assertDeployedAddress("AZORIUS", expected_.azorius, azorius_);
+        if (config_.governance.timelockEnabled) {
+            bytes memory timelockInitParams = abi.encode(
+                deployer_,
+                address(0), // vetoGuardian — deferred per PLAN.md §0
+                new address[](0),
+                config_.governance.timelockDelay,
+                config_.governance.avatarQuorum
+            );
+            proxyFactory.deployProxy(
+                config_.governance.sxTimelockImpl,
+                abi.encodeCall(TimelockExecutionStrategy.setUp, (timelockInitParams)),
+                1
+            );
+            timelockExecutionStrategy_ = _computeProxyAddress(
+                config_.governance.sxProxyFactory, config_.governance.sxTimelockImpl, deployer_, 1
+            );
+            _assertDeployedAddress(
+                "TIMELOCK_EXEC_STRATEGY", expected_.timelockExecutionStrategy, timelockExecutionStrategy_
+            );
+        }
     }
 
     function _deployCoreContracts(
@@ -187,7 +244,7 @@ abstract contract PENDeploymentHelper {
                 bootstrapAuthority_,
                 address(0),
                 address(0),
-                expected_.strategy
+                address(0) // ACTIVITY_ROLE: granted to PENTxAuthenticator in _finalizeAccess
             )
         );
         _assertDeployedAddress("SEAT_TOKEN", expected_.seatToken, seatToken_);
@@ -217,42 +274,75 @@ abstract contract PENDeploymentHelper {
         _assertDeployedAddress("BONDING_TRANCHE", expected_.bondingTranche, bondingTranche_);
     }
 
-    function _initializeGovernance(DeploymentAddresses memory deployed_, DeploymentConfig memory config_) internal {
-        ProposerAdapterERC20V1(deployed_.proposerAdapter)
-            .initialize(deployed_.seatToken, config_.governance.proposerThreshold);
+    function _deploySpace(DeploymentAddresses memory deployed_, DeploymentConfig memory config_, address deployer_)
+        internal
+        returns (address space_)
+    {
+        // Stock `OZVotesVotingStrategy` decodes its params via `address(bytes20(params))`,
+        // which is the raw 20-byte encoding (`abi.encodePacked`), not the 32-byte padded
+        // `abi.encode`.
+        bytes memory ozVotesParams = abi.encodePacked(deployed_.seatToken);
 
-        address[] memory proposerAdapters = new address[](1);
-        proposerAdapters[0] = deployed_.proposerAdapter;
-        PENStrategyV1(deployed_.strategy)
-            .initialize(
-                config_.governance.votingPeriod,
-                config_.governance.quorumThreshold,
-                config_.governance.basisNumerator,
-                proposerAdapters,
-                config_.governance.lightAccountFactory
+        Strategy[] memory votingStrategies = new Strategy[](1);
+        votingStrategies[0] = Strategy({addr: config_.governance.sxOzVotesStrategy, params: ozVotesParams});
+
+        // PropositionPower params: (threshold, allowedStrategies[])
+        Strategy[] memory propPowerStrategies = new Strategy[](1);
+        propPowerStrategies[0] = Strategy({addr: config_.governance.sxOzVotesStrategy, params: ozVotesParams});
+
+        string[] memory votingStrategyMetadataURIs = new string[](1);
+        votingStrategyMetadataURIs[0] = "";
+
+        address[] memory authenticators = new address[](1);
+        authenticators[0] = deployed_.penTxAuthenticator;
+
+        InitializeCalldata memory spaceInit = InitializeCalldata({
+            owner: deployed_.safe,
+            votingDelay: config_.governance.votingDelay,
+            minVotingDuration: config_.governance.minVotingDuration,
+            maxVotingDuration: config_.governance.maxVotingDuration,
+            proposalValidationStrategy: Strategy({
+                addr: config_.governance.sxPropositionPowerValidation,
+                params: abi.encode(config_.governance.proposerSeatThreshold, propPowerStrategies)
+            }),
+            proposalValidationStrategyMetadataURI: "",
+            daoURI: "",
+            metadataURI: "",
+            votingStrategies: votingStrategies,
+            votingStrategyMetadataURIs: votingStrategyMetadataURIs,
+            authenticators: authenticators
+        });
+
+        uint256 spaceSaltNonce = config_.governance.timelockEnabled ? 2 : 1;
+        IProxyFactory(config_.governance.sxProxyFactory)
+            .deployProxy(
+                config_.governance.sxMasterSpace, abi.encodeCall(ISpace.initialize, (spaceInit)), spaceSaltNonce
             );
 
-        VotingWeightERC20V1(deployed_.votingWeight)
-            .initialize(deployed_.seatToken, config_.governance.votingWeightPerToken);
+        space_ = _computeProxyAddress(
+            config_.governance.sxProxyFactory, config_.governance.sxMasterSpace, deployer_, spaceSaltNonce
+        );
+    }
 
-        address[] memory authorizedCallers = new address[](1);
-        authorizedCallers[0] = deployed_.strategy;
-        VoteTrackerERC20V1(deployed_.voteTracker).initialize(authorizedCallers);
+    function _initializeGovernance(DeploymentAddresses memory deployed_) internal {
+        // The Space directly calls either the timelock (if enabled) or the avatar.
+        address spaceExecutionTarget = deployed_.timelockExecutionStrategy != address(0)
+            ? deployed_.timelockExecutionStrategy
+            : deployed_.executionStrategy;
 
-        ModuleAzoriusV1(deployed_.azorius)
-            .initialize(
-                deployed_.safe,
-                deployed_.safe,
-                deployed_.safe,
-                deployed_.strategy,
-                config_.governance.timelockPeriod,
-                config_.governance.executionPeriod
-            );
+        // Space → spaceExecutionTarget
+        ISpaceManager(spaceExecutionTarget).enableSpace(deployed_.space);
 
-        IVotingTypes.VotingConfig[] memory votingConfigs = new IVotingTypes.VotingConfig[](1);
-        votingConfigs[0] =
-            IVotingTypes.VotingConfig({votingWeight: deployed_.votingWeight, voteTracker: deployed_.voteTracker});
-        PENStrategyV1(deployed_.strategy).initialize2(deployed_.azorius, votingConfigs);
+        // If timelock wraps avatar: timelock → avatar
+        if (deployed_.timelockExecutionStrategy != address(0)) {
+            ISpaceManager(deployed_.executionStrategy).enableSpace(deployed_.timelockExecutionStrategy);
+        }
+
+        // Transfer execution strategy ownership from deployer to Safe
+        IOwnable(deployed_.executionStrategy).transferOwnership(deployed_.safe);
+        if (deployed_.timelockExecutionStrategy != address(0)) {
+            IOwnable(deployed_.timelockExecutionStrategy).transferOwnership(deployed_.safe);
+        }
     }
 
     function _finalizeAccess(DeploymentAddresses memory deployed_, address bootstrapAuthority_) internal {
@@ -262,7 +352,14 @@ abstract contract PENDeploymentHelper {
 
         seatToken.grantRole(seatToken.MINTER_ROLE(), deployed_.bondingTranche);
         seatToken.grantRole(seatToken.BURNER_ROLE(), deployed_.bondingTranche);
-        seatToken.grantRole(seatToken.DEFAULT_ADMIN_ROLE(), deployed_.safe);
+        seatToken.grantRole(seatToken.ACTIVITY_ROLE(), deployed_.penTxAuthenticator);
+        // `DEFAULT_ADMIN_ROLE` is intentionally NOT granted to the Safe before the deployer
+        // renounces. SeatToken has no admin-gated operational functions — `DEFAULT_ADMIN_ROLE`
+        // there only controls role reassignment. Leaving it unheld permanently freezes the
+        // MINTER / BURNER / ACTIVITY assignments above, so a captured governance majority
+        // can never re-route mint/burn rights to confiscate or dilute seats.
+        // PrincipalManager and BondingTranche keep their Safe-held admin roles because they
+        // gate real governance operations (executeFunding, extendTranches, asset migration).
         seatToken.renounceRole(seatToken.DEFAULT_ADMIN_ROLE(), bootstrapAuthority_);
 
         principalManager.grantRole(principalManager.BONDING_ROLE(), deployed_.bondingTranche);
@@ -275,11 +372,19 @@ abstract contract PENDeploymentHelper {
         bondingTranche.renounceRole(bondingTranche.DEFAULT_ADMIN_ROLE(), bootstrapAuthority_);
     }
 
-    function _safeInitializer(DeploymentAddresses memory predicted_) internal pure returns (bytes memory) {
-        address[] memory owners = new address[](1);
-        owners[0] = predicted_.azorius;
+    // ── Safe initializer ───────────────────────────────────────────────────────────────
 
-        bytes memory bootstrapData = abi.encodeCall(PENSafeBootstrap.setUp, (predicted_.azorius));
+    function _safeInitializer(DeploymentAddresses memory predicted_) internal pure returns (bytes memory) {
+        // The Safe's single owner is the execution strategy (or timelock if enabled).
+        // PENSafeBootstrap.setUp enables it as a module via delegatecall during Safe.setup.
+        address moduleToEnable = predicted_.timelockExecutionStrategy != address(0)
+            ? predicted_.timelockExecutionStrategy
+            : predicted_.executionStrategy;
+
+        address[] memory owners = new address[](1);
+        owners[0] = moduleToEnable;
+
+        bytes memory bootstrapData = abi.encodeCall(PENSafeBootstrap.setUp, (moduleToEnable));
 
         return abi.encodeCall(
             Safe.setup,
@@ -295,12 +400,24 @@ abstract contract PENDeploymentHelper {
         return Create2.computeAddress(proxySalt, proxyInitCodeHash, predicted_.safeProxyFactory);
     }
 
+    // ── Address computation helpers ────────────────────────────────────────────────────
+
     function _computeCreateAddress(address deployer_, uint256 nonce_) internal pure returns (address) {
         bytes[] memory encoded = new bytes[](2);
         encoded[0] = RLP.encode(deployer_);
         encoded[1] = RLP.encode(nonce_);
 
         return address(uint160(uint256(keccak256(RLP.encode(encoded)))));
+    }
+
+    function _computeProxyAddress(
+        address sxProxyFactory_,
+        address implementation_,
+        address deployer_,
+        uint256 saltNonce_
+    ) internal view returns (address) {
+        bytes32 salt = keccak256(abi.encodePacked(deployer_, saltNonce_));
+        return IProxyFactory(sxProxyFactory_).predictProxyAddress(implementation_, salt);
     }
 
     function _assertDeployedAddress(bytes32 component_, address expected_, address actual_) internal pure {
@@ -317,6 +434,8 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
     uint256 internal constant _DEFAULT_GAS_BUFFER_BPS = 12_000;
     uint256 internal constant _BPS_DENOMINATOR = 10_000;
 
+    // ── Config loading ─────────────────────────────────────────────────────────────────
+
     function _loadConfig() internal view returns (DeploymentConfig memory config) {
         config.core = CoreConfig({
             seatName: vm.envString("SEAT_TOKEN_NAME"),
@@ -331,17 +450,25 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
             tranchePrices: vm.envUint("TRANCHE_PRICES", ",")
         });
 
+        bool timelockEnabled_ = _envBoolOrFalse("TIMELOCK_ENABLED");
         config.governance = GovernanceConfig({
-            votingPeriod: uint32(vm.envUint("VOTING_PERIOD")),
-            timelockPeriod: uint32(vm.envUint("TIMELOCK_PERIOD")),
-            executionPeriod: uint32(vm.envUint("EXECUTION_PERIOD")),
-            quorumThreshold: vm.envUint("QUORUM_THRESHOLD"),
-            basisNumerator: vm.envUint("BASIS_NUMERATOR"),
-            proposerThreshold: vm.envUint("PROPOSER_THRESHOLD"),
-            votingWeightPerToken: vm.envUint("VOTING_WEIGHT_PER_TOKEN"),
-            lightAccountFactory: _envOrZeroAddress("LIGHT_ACCOUNT_FACTORY")
+            sxProxyFactory: vm.envAddress("SX_PROXY_FACTORY"),
+            sxMasterSpace: vm.envAddress("SX_MASTER_SPACE"),
+            sxAvatarImpl: vm.envAddress("SX_AVATAR_IMPL"),
+            sxTimelockImpl: vm.envAddress("SX_TIMELOCK_IMPL"),
+            sxPropositionPowerValidation: vm.envAddress("SX_PROPOSITION_POWER_VALIDATION"),
+            sxOzVotesStrategy: vm.envAddress("SX_OZ_VOTES_STRATEGY"),
+            votingDelay: uint32(vm.envUint("VOTING_DELAY")),
+            minVotingDuration: uint32(vm.envUint("MIN_VOTING_DURATION")),
+            maxVotingDuration: uint32(vm.envUint("MAX_VOTING_DURATION")),
+            avatarQuorum: vm.envUint("AVATAR_QUORUM"),
+            proposerSeatThreshold: vm.envUint("PROPOSER_SEAT_THRESHOLD"),
+            timelockEnabled: timelockEnabled_,
+            timelockDelay: timelockEnabled_ ? uint32(vm.envUint("TIMELOCK_DELAY")) : 0
         });
     }
+
+    // ── Deployer resolution ────────────────────────────────────────────────────────────
 
     function _resolveDeployer() internal view returns (address deployer_) {
         try vm.envUint("PRIVATE_KEY") returns (uint256 privateKey) {
@@ -375,26 +502,75 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
         vm.stopBroadcast();
     }
 
+    // ── Logging ────────────────────────────────────────────────────────────────────────
+
     function _logDeploymentPlan(address deployer_, uint256 startingNonce_, bytes32 salt_) internal pure {
         console2.log("Deployer:", deployer_);
         console2.log("Starting nonce:", startingNonce_);
         console2.logBytes32(salt_);
     }
 
-    function _logAddresses(DeploymentAddresses memory deployed_) internal pure {
-        console2.log("SafeSingleton:", deployed_.safeSingleton);
-        console2.log("SafeProxyFactory:", deployed_.safeProxyFactory);
-        console2.log("PENSafeBootstrap:", deployed_.safeBootstrap);
-        console2.log("Safe:", deployed_.safe);
-        console2.log("SeatToken:", deployed_.seatToken);
-        console2.log("PrincipalManager:", deployed_.principalManager);
-        console2.log("BondingTranche:", deployed_.bondingTranche);
-        console2.log("Strategy:", deployed_.strategy);
-        console2.log("Azorius:", deployed_.azorius);
-        console2.log("VotingWeight:", deployed_.votingWeight);
-        console2.log("VoteTracker:", deployed_.voteTracker);
-        console2.log("ProposerAdapter:", deployed_.proposerAdapter);
+    function _logAddresses(DeploymentAddresses memory d_) internal pure {
+        console2.log("SafeSingleton:             ", d_.safeSingleton);
+        console2.log("SafeProxyFactory:          ", d_.safeProxyFactory);
+        console2.log("PENSafeBootstrap:          ", d_.safeBootstrap);
+        console2.log("Safe:                      ", d_.safe);
+        console2.log("SeatToken:                 ", d_.seatToken);
+        console2.log("PrincipalManager:          ", d_.principalManager);
+        console2.log("BondingTranche:            ", d_.bondingTranche);
+        console2.log("PENTxAuthenticator:        ", d_.penTxAuthenticator);
+        console2.log("Space:                     ", d_.space);
+        console2.log("ExecutionStrategy:         ", d_.executionStrategy);
+        console2.log("TimelockExecutionStrategy: ", d_.timelockExecutionStrategy);
     }
+
+    function _writeDeploymentArtifact(DeploymentAddresses memory d_) internal {
+        string memory json = string.concat(
+            "{\n",
+            '  "safeSingleton": "',
+            vm.toString(d_.safeSingleton),
+            '",\n',
+            '  "safeProxyFactory": "',
+            vm.toString(d_.safeProxyFactory),
+            '",\n',
+            '  "safeBootstrap": "',
+            vm.toString(d_.safeBootstrap),
+            '",\n',
+            '  "safe": "',
+            vm.toString(d_.safe),
+            '",\n',
+            '  "seatToken": "',
+            vm.toString(d_.seatToken),
+            '",\n',
+            '  "principalManager": "',
+            vm.toString(d_.principalManager),
+            '",\n',
+            '  "bondingTranche": "',
+            vm.toString(d_.bondingTranche),
+            '",\n',
+            '  "penTxAuthenticator": "',
+            vm.toString(d_.penTxAuthenticator),
+            '",\n',
+            '  "space": "',
+            vm.toString(d_.space),
+            '",\n',
+            '  "executionStrategy": "',
+            vm.toString(d_.executionStrategy),
+            '",\n',
+            '  "timelockExecutionStrategy": "',
+            vm.toString(d_.timelockExecutionStrategy),
+            '"\n',
+            "}"
+        );
+
+        string memory dir = "deployments";
+        vm.createDir(dir, true);
+        string memory path = string.concat("deployments/", vm.toString(block.chainid), ".json");
+        vm.writeFile(path, json);
+        console2.log("Deployment artifact written to:", path);
+    }
+
+    // ── Env helpers ────────────────────────────────────────────────────────────────────
 
     function _envOrZeroAddress(string memory key) internal view returns (address value) {
         try vm.envAddress(key) returns (address parsed) {
@@ -403,6 +579,16 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
             return address(0);
         }
     }
+
+    function _envBoolOrFalse(string memory key) internal view returns (bool) {
+        try vm.envBool(key) returns (bool v) {
+            return v;
+        } catch {
+            return false;
+        }
+    }
+
+    // ── Gas estimation ─────────────────────────────────────────────────────────────────
 
     /// @notice Reverts with a clear error if `deployer_` cannot cover the deployment.
     /// @dev Estimates gas by simulating the full deployment from the script's own context (constructor work

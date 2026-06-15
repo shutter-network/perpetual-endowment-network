@@ -5,11 +5,12 @@ import {AccessControl} from "openzeppelin-contracts/contracts/access/AccessContr
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
+import {Pausable} from "openzeppelin-contracts/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 
 import {IPrincipalManager} from "./interfaces/IPrincipalManager.sol";
 
-contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
+contract PrincipalManager is IPrincipalManager, AccessControl, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant BONDING_ROLE = keccak256("BONDING_ROLE");
@@ -42,6 +43,7 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
     event PrincipalVaultUpdated(address indexed previousVault, address indexed newVault);
     event PrincipalVaultWithdrawal(address indexed vault, address indexed receiver, uint256 assets, uint256 shares);
     event VaultWithdrawal(address indexed vault, address indexed receiver, uint256 assets, uint256 shares);
+    event Withdrawn(address indexed token, address indexed receiver, uint256 amount);
 
     constructor(
         IERC20 asset_,
@@ -66,6 +68,7 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
         external
         override
         onlyRole(BONDING_ROLE)
+        whenNotPaused
         nonReentrant
         returns (uint256 shares)
     {
@@ -79,7 +82,13 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
         return _depositExcessToPrincipalVault();
     }
 
-    function payRefund(address receiver, uint256 amount) external override onlyRole(BONDING_ROLE) nonReentrant {
+    function payRefund(address receiver, uint256 amount)
+        external
+        override
+        onlyRole(BONDING_ROLE)
+        whenNotPaused
+        nonReentrant
+    {
         if (amount == 0) revert InvalidAmount();
         if (amount > accountedPrincipal) revert PrincipalUnderflow(accountedPrincipal, amount);
 
@@ -217,6 +226,38 @@ contract PrincipalManager is IPrincipalManager, AccessControl, ReentrancyGuard {
         (shares, resolvedReceiver) = _withdrawFromVault(vault, assets, receiver);
 
         emit VaultWithdrawal(address(vault), resolvedReceiver, assets, shares);
+    }
+
+    /// @notice Pause `recordPurchase` and `payRefund`. Intended for winding the system down
+    ///         before a PEN→PEN migration (e.g. moving treasury to a freshly-deployed PEN
+    ///         with different asset / parameters). See `docs/pen-migration.md`.
+    /// @dev Does NOT freeze admin operations: `withdraw`, `executeFunding`, vault management,
+    ///      and role administration continue to work. Reclaim is gated separately on
+    ///      `BondingTranche` and also blocked while paused.
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+
+    function paused() public view override(IPrincipalManager, Pausable) returns (bool) {
+        return Pausable.paused();
+    }
+
+    /// @notice Admin-controlled withdrawal of any ERC20 balance held by this contract.
+    /// @dev Callable at any time, including while not paused. Does NOT decrement
+    ///      `accountedPrincipal`; the refund obligation continues to exist on book after a
+    ///      withdrawal. Use case: draining treasury into the Safe ahead of a PEN→PEN
+    ///      migration, or rescuing tokens that were sent here by mistake (airdrops, wrong
+    ///      transfers).
+    function withdraw(IERC20 token, address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        if (address(token) == address(0)) revert InvalidAsset(address(token));
+        if (to == address(0)) revert InvalidReceiver(to);
+        if (amount == 0) revert InvalidAmount();
+        token.safeTransfer(to, amount);
+        emit Withdrawn(address(token), to, amount);
     }
 
     function liquidAssets() public view returns (uint256) {

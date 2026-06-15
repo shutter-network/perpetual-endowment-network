@@ -6,7 +6,7 @@ This document is a practical guide for **PEN operators / governors** (Safe signe
 
 ## Change or set the `PrincipalManager` principal vault (governance proposal recipes)
 
-PEN uses **Azorius proposals (YES/NO voting)** to execute on-chain transactions from the Safe.
+PEN uses **Snapshot X (EVM) proposals (YES/NO voting)** to execute on-chain transactions from the Safe.
 
 The principal vault is the ERC-4626 vault at `PrincipalManager.principalVault()`. The vault may be unset at deployment time (`address(0)`), and can be set later via governance.
 
@@ -90,7 +90,7 @@ If refunds are blocked due to insolvency and governance wants refunds to be avai
 PEN funding rounds are expected to run as:
 
 1. **Off-chain (Snapshot, ranked-choice)**: The Ranked-Choice funding execution voting happens off-chain on Snapshot. Members submit slates and they vote and a *winning slate* (recipients + amounts) is selected.
-2. **On-chain (Azorius, YES/NO)**: a member submits a proposal that encodes that winning slate as executable transactions, and seat holders vote YES/NO.
+2. **On-chain (Snapshot X / EVM, YES/NO)**: a member submits a proposal that encodes that winning slate as executable transactions, and seat holders vote YES/NO.
 
 ### On-chain execution patterns
 
@@ -102,7 +102,7 @@ When governance wants to pay out funds to multiple recipients (e.g. after an off
 
 1. `PrincipalManager.executeFunding(recipients, amounts)`
 
-This is kept as a first-class primitive because it is **more gas efficient under Azorius execution** than executing many per-recipient transfers.
+This is kept as a first-class primitive because it is **more gas efficient under Snapshot X execution** than executing many per-recipient transfers.
 
 ### Option 2: withdraw to the Safe, then do N transfers
 
@@ -111,7 +111,7 @@ This is kept as a first-class primitive because it is **more gas efficient under
 1. `PrincipalManager.withdrawFromPrincipalVault(totalAmount, safe)`
 2. \(N times\) `ERC20(asset).transfer(recipient, amount)`
 
-This is operationally flexible, but it is generally **more expensive in governance execution** because Azorius/Safe pays overhead per transaction.
+This is operationally flexible, but it is generally **more expensive in governance execution** because the Snapshot Safe pays overhead per transaction in the MultiSend batch.
 
 ---
 

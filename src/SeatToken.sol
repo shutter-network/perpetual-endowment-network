@@ -58,14 +58,6 @@ contract SeatToken is ISeatToken, ERC20, ERC20Votes, AccessControl {
         return 0;
     }
 
-    function CLOCK_MODE() public pure override returns (string memory) {
-        return "mode=timestamp";
-    }
-
-    function clock() public view override returns (uint48) {
-        return uint48(block.timestamp);
-    }
-
     function mint(address to, uint256 amount) external override onlyRole(MINTER_ROLE) {
         _mint(to, amount);
     }

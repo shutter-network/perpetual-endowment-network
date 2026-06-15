@@ -17,10 +17,10 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     error HolderStillActive(address holder);
     error InvalidAdmin(address admin);
     error InvalidAmount();
-    error InvalidPrice(uint256 price);
     error InvalidRecipient(address recipient);
     error InvalidRefundReceiver(address receiver);
     error InvalidTrancheConfiguration();
+    error PrincipalManagerPaused();
     error PurchaseCostExceedsLimit(uint256 cost, uint256 maxCost);
     error InsufficientSeatsAvailable(uint256 requested, uint256 available);
     error RefundObligationExceedsManagedAssets(uint256 obligation, uint256 managedAssets);
@@ -117,8 +117,6 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
 
         uint256 previousUpperBound = _trancheUpperBounds[_trancheUpperBounds.length - 1];
         uint256 previousPrice = _tranchePrices[_tranchePrices.length - 1];
-        uint256 currentSupply = IERC20(address(seatToken)).totalSupply();
-
         for (uint256 i; i < length; ++i) {
             uint256 upperBound = newUpperBounds[i];
             uint256 price = newPrices[i];
@@ -182,6 +180,7 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
         nonReentrant
         returns (uint256 totalCost)
     {
+        if (principalManager.paused()) revert PrincipalManagerPaused();
         if (recipient == address(0)) revert InvalidRecipient(recipient);
 
         totalCost = quotePurchase(amount);
@@ -195,6 +194,7 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     }
 
     function refund(uint256 amount, address receiver) external nonReentrant returns (uint256 refundAmount) {
+        if (principalManager.paused()) revert PrincipalManagerPaused();
         address refundReceiver = receiver == address(0) ? msg.sender : receiver;
         if (refundReceiver == address(0)) revert InvalidRefundReceiver(refundReceiver);
 
@@ -213,6 +213,7 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     }
 
     function reclaim(address holder) external onlyRole(RECLAIMER_ROLE) nonReentrant returns (uint256 reclaimedSeats) {
+        if (principalManager.paused()) revert PrincipalManagerPaused();
         if (!seatToken.isInactive(holder)) revert HolderStillActive(holder);
 
         reclaimedSeats = IERC20(address(seatToken)).balanceOf(holder);

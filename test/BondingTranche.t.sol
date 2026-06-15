@@ -291,4 +291,68 @@ contract BondingTrancheTest is Test {
         vm.expectRevert(abi.encodeWithSelector(BondingTranche.HolderStillActive.selector, alice));
         bondingTranche.reclaim(alice);
     }
+
+    // ── Pause cascade: BondingTranche reads PrincipalManager.paused() ──────────
+
+    function test_PurchaseRevertsWhilePrincipalManagerPaused() public {
+        usdc.mint(alice, 5e6);
+        vm.prank(alice);
+        usdc.approve(address(bondingTranche), 5e6);
+
+        vm.prank(admin);
+        principalManager.pause();
+
+        vm.prank(alice);
+        vm.expectRevert(BondingTranche.PrincipalManagerPaused.selector);
+        bondingTranche.purchase(alice, 1, 1e6);
+    }
+
+    function test_RefundRevertsWhilePrincipalManagerPaused() public {
+        usdc.mint(alice, 5e6);
+        vm.startPrank(alice);
+        usdc.approve(address(bondingTranche), 5e6);
+        bondingTranche.purchase(alice, 1, 1e6);
+        vm.stopPrank();
+
+        vm.prank(admin);
+        principalManager.pause();
+
+        vm.prank(alice);
+        vm.expectRevert(BondingTranche.PrincipalManagerPaused.selector);
+        bondingTranche.refund(1, alice);
+    }
+
+    function test_ReclaimRevertsWhilePrincipalManagerPaused() public {
+        usdc.mint(alice, 5e6);
+        vm.startPrank(alice);
+        usdc.approve(address(bondingTranche), 5e6);
+        bondingTranche.purchase(alice, 1, 1e6);
+        vm.stopPrank();
+
+        // Advance past inactivity period so reclaim would otherwise be valid.
+        vm.warp(block.timestamp + 366 days);
+        assertTrue(seatToken.isInactive(alice));
+
+        vm.prank(admin);
+        principalManager.pause();
+
+        vm.prank(reclaimer);
+        vm.expectRevert(BondingTranche.PrincipalManagerPaused.selector);
+        bondingTranche.reclaim(alice);
+    }
+
+    function test_PurchaseResumes_afterUnpause() public {
+        usdc.mint(alice, 5e6);
+        vm.prank(alice);
+        usdc.approve(address(bondingTranche), 5e6);
+
+        vm.prank(admin);
+        principalManager.pause();
+        vm.prank(admin);
+        principalManager.unpause();
+
+        vm.prank(alice);
+        bondingTranche.purchase(alice, 1, 1e6);
+        assertEq(seatToken.balanceOf(alice), 1);
+    }
 }
