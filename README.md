@@ -58,6 +58,19 @@ Further reading: [`docs/flows.md`](docs/flows.md), [`docs/pen-operator-guide.md`
 - `accountedPrincipal` tracks the protocol's principal obligation (created by seat sales, reduced by refunds).
 - `availableYield = max(totalManagedAssets − accountedPrincipal, 0)`.
 
+## PEN → PEN migration
+
+PEN's core parameters — payment asset, refund price, tranche schedule, supply cap, inactivity period — are immutable in the deployed contracts. When governance needs to change any of them, the path is to **deploy a new PEN and migrate the treasury into it**.
+
+Two admin primitives on `PrincipalManager` support this, both gated by the Safe's `DEFAULT_ADMIN_ROLE`:
+
+- `pause()` / `unpause()` — freezes user-state-changing flows (`purchase`, `refund`, `reclaim`) on the old deployment without disturbing admin operations.
+- `withdraw(token, to, amount)` — moves any ERC-20 balance out of `PrincipalManager` to a chosen receiver. Callable any time; does not adjust `accountedPrincipal`.
+
+A migration ceremony typically looks like: deploy the new PEN → pause the old `PrincipalManager` → drain its principal vault to liquid → `withdraw` the treasury to the Safe → (if migrating to a different asset, swap externally) → seed the new `PrincipalManager` → governance on the new PEN reissues seats to original holders.
+
+The most common reason to migrate is **payment-asset migration** (e.g. USDC → USDT), but the same procedure applies to any change that requires fresh contracts. See `docs/pen-migration.md` for the step-by-step runbook and risks.
+
 ## Setup & Deployment
 
 ### Prerequisites

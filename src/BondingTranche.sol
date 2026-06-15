@@ -17,28 +17,23 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     error HolderStillActive(address holder);
     error InvalidAdmin(address admin);
     error InvalidAmount();
-    error InvalidPrice(uint256 price);
     error InvalidRecipient(address recipient);
     error InvalidRefundReceiver(address receiver);
     error InvalidTrancheConfiguration();
-    error MigrationActiveOnPrincipalManager();
+    error PrincipalManagerPaused();
     error PurchaseCostExceedsLimit(uint256 cost, uint256 maxCost);
     error InsufficientSeatsAvailable(uint256 requested, uint256 available);
     error RefundObligationExceedsManagedAssets(uint256 obligation, uint256 managedAssets);
-    error TrancheScheduleBelowSupply(uint256 minRequiredUpperBound, uint256 totalSupply);
 
     ISeatToken public immutable seatToken;
     IPrincipalManager public immutable principalManager;
-    IERC20 public asset;
-    uint256 public refundPrice;
+    IERC20 public immutable asset;
+    uint256 public immutable refundPrice;
 
     uint256[] private _trancheUpperBounds;
     uint256[] private _tranchePrices;
 
-    event AssetSynced(address indexed newAsset);
-    event RefundPriceUpdated(uint256 oldPrice, uint256 newPrice);
     event TrancheExtended(uint256 previousUpperBound, uint256 newUpperBound, uint256 pricePerSeat);
-    event TrancheScheduleReplaced(uint256[] upperBounds, uint256[] prices);
 
     event SeatsPurchased(
         address indexed payer, address indexed recipient, uint256 seats, uint256 totalCost, uint256 newTotalSupply
@@ -185,7 +180,7 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
         nonReentrant
         returns (uint256 totalCost)
     {
-        if (principalManager.migrationActive()) revert MigrationActiveOnPrincipalManager();
+        if (principalManager.paused()) revert PrincipalManagerPaused();
         if (recipient == address(0)) revert InvalidRecipient(recipient);
 
         totalCost = quotePurchase(amount);
@@ -199,7 +194,7 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     }
 
     function refund(uint256 amount, address receiver) external nonReentrant returns (uint256 refundAmount) {
-        if (principalManager.migrationActive()) revert MigrationActiveOnPrincipalManager();
+        if (principalManager.paused()) revert PrincipalManagerPaused();
         address refundReceiver = receiver == address(0) ? msg.sender : receiver;
         if (refundReceiver == address(0)) revert InvalidRefundReceiver(refundReceiver);
 
@@ -218,6 +213,7 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     }
 
     function reclaim(address holder) external onlyRole(RECLAIMER_ROLE) nonReentrant returns (uint256 reclaimedSeats) {
+        if (principalManager.paused()) revert PrincipalManagerPaused();
         if (!seatToken.isInactive(holder)) revert HolderStillActive(holder);
 
         reclaimedSeats = IERC20(address(seatToken)).balanceOf(holder);
@@ -225,50 +221,6 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
 
         seatToken.burn(holder, reclaimedSeats);
         emit SeatsReclaimed(holder, reclaimedSeats, IERC20(address(seatToken)).totalSupply());
-    }
-
-    function syncFromPrincipalManager() external onlyRole(DEFAULT_ADMIN_ROLE) {
-        IERC20 newAsset = principalManager.asset();
-        asset = newAsset;
-        emit AssetSynced(address(newAsset));
-    }
-
-    function setRefundPrice(uint256 newRefundPrice) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (newRefundPrice == 0) revert InvalidPrice(newRefundPrice);
-        uint256 oldPrice = refundPrice;
-        refundPrice = newRefundPrice;
-        emit RefundPriceUpdated(oldPrice, newRefundPrice);
-    }
-
-    function replaceTrancheSchedule(uint256[] calldata newUpperBounds, uint256[] calldata newPrices)
-        external
-        onlyRole(DEFAULT_ADMIN_ROLE)
-    {
-        uint256 length = newUpperBounds.length;
-        if (length == 0 || length != newPrices.length) revert InvalidTrancheConfiguration();
-
-        uint256 previousUpperBound;
-        uint256 previousPrice;
-        uint256 currentSupply = IERC20(address(seatToken)).totalSupply();
-        for (uint256 i; i < length; ++i) {
-            uint256 upperBound = newUpperBounds[i];
-            uint256 price = newPrices[i];
-            if (upperBound <= previousUpperBound || price <= previousPrice) revert InvalidTrancheConfiguration();
-            if (upperBound > seatToken.supplyCap()) revert InvalidTrancheConfiguration();
-            previousUpperBound = upperBound;
-            previousPrice = price;
-        }
-        if (newUpperBounds[length - 1] < currentSupply) {
-            revert TrancheScheduleBelowSupply(currentSupply, currentSupply);
-        }
-
-        delete _trancheUpperBounds;
-        delete _tranchePrices;
-        for (uint256 i; i < length; ++i) {
-            _trancheUpperBounds.push(newUpperBounds[i]);
-            _tranchePrices.push(newPrices[i]);
-        }
-        emit TrancheScheduleReplaced(newUpperBounds, newPrices);
     }
 
     function _grantOptionalRole(bytes32 role, address account) internal {

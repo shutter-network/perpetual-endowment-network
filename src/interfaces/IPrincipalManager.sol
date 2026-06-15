@@ -12,5 +12,5 @@ interface IPrincipalManager {
 
     function totalManagedAssets() external view returns (uint256);
 
-    function migrationActive() external view returns (bool);
+    function paused() external view returns (bool);
 }
