@@ -81,12 +81,14 @@ flowchart LR
 
 ## Governance call chain (on-chain election cycle)
 
-All governance interactions (propose, vote, update proposal) are routed through `PENTxAuthenticator.authenticate`. Members never call `Space` directly. `Space.execute` (finalization) is the only action that bypasses the authenticator and can be called by anyone.
+All governance interactions (propose, vote, update proposal) are routed through the Space's whitelisted authenticator. At deploy the Space whitelists the stock `EthTxAuthenticator`; the DAO can enable additional stock authenticators (e.g. `EthSigAuthenticator` for gasless voting) later via a governance-owned `Space.updateSettings` proposal. Members never call `Space` directly. `Space.execute` (finalization) is the only action that bypasses the authenticator and can be called by anyone.
+
+Seat activity is refreshed separately via `SeatToken.refreshActivity(voter, proposalId)` after the vote lands on-chain — see §Activity refresh flow below.
 
 ```mermaid
 flowchart TD
   Member["Member (seat holder)"]
-  AUTH["PENTxAuthenticator\n.authenticate(space, selector, data)"]
+  AUTH["EthTxAuthenticator (stock)\n.authenticate(space, selector, data)"]
   SPACE["Space"]
   EXEC["AvatarExecutionStrategy"]
   SAFE["Safe (treasury)"]
@@ -95,7 +97,6 @@ flowchart TD
   Member -- "1. propose" --> AUTH
   Member -- "2. vote" --> AUTH
   AUTH -. "forward call" .-> SPACE
-  AUTH -. "recordActivity on SeatToken" .-> SPACE
 
   Member -- "3. execute (no auth)" --> SPACE
   SPACE -. "executeFunding / any call" .-> EXEC
@@ -138,12 +139,12 @@ Wait at least 1 block after this call before creating a proposal.
 
 ---
 
-## Step-by-step: governance actions (via PENTxAuthenticator)
+## Step-by-step: governance actions
 
-All calls below follow the same pattern:
+All calls below route through the Space's whitelisted authenticator. The examples use the stock `EthTxAuthenticator` deployed by Snapshot Labs at a canonical address per chain (see `SX_ETH_TX_AUTHENTICATOR` in the deployment config). If the DAO later enables `EthSigAuthenticator` via `Space.updateSettings`, the same calldata shapes apply — only the transport (EIP-712 signature vs. direct tx) differs.
 
 ```solidity
-PENTxAuthenticator.authenticate(
+EthTxAuthenticator.authenticate(
     address space,           // the Space contract address
     bytes4  functionSelector,
     bytes   calldata data    // ABI-encoded arguments for the Space function
@@ -192,7 +193,7 @@ bytes memory data = abi.encode(
     abi.encode(userStrategies)     // see "voting strategies" note below
 );
 
-PENTxAuthenticator.authenticate(space, PROPOSE_SELECTOR, data);
+EthTxAuthenticator.authenticate(space, PROPOSE_SELECTOR, data);
 ```
 
 After the transaction is mined, note the `proposalId` (read from `Space.nextProposalId()` before the call, or from emitted events).
@@ -226,12 +227,12 @@ bytes memory data = abi.encode(
     ""                // string metadata — leave empty
 );
 
-PENTxAuthenticator.authenticate(space, VOTE_SELECTOR, data);
+EthTxAuthenticator.authenticate(space, VOTE_SELECTOR, data);
 ```
 
 Voting power is measured at `startBlockNumber` (the block the proposal was created + `VOTING_DELAY`). Seats bought after that block have no power on this proposal.
 
-Calling `authenticate` also records seat activity — the voter's `lastActivityAt` is refreshed, counting toward the inactivity clock.
+Activity is **not** refreshed by `authenticate`. After the vote is included on-chain, the voter (or a keeper, or the frontend) must submit a separate `SeatToken.refreshActivity(voter, proposalId)` call to update `lastActivityAt`. See §Activity refresh flow below.
 
 ---
 
@@ -247,6 +248,48 @@ Space.execute(
 ```
 
 The Space verifies the payload hash, then calls `AvatarExecutionStrategy.execute`, which calls `Safe.execTransactionFromModule`, which calls the target (e.g. `PrincipalManager.executeFunding`).
+
+---
+
+## Activity refresh flow
+
+Seat activity is refreshed via **permissionless** functions on `SeatToken`. Neither the authenticator nor the Space touches `SeatToken` — the refresh call verifies the vote (or proposal) independently against the Space's on-chain `voteRegistry` / `proposals` mapping.
+
+### The functions
+
+```solidity
+// Vote-based refresh: verifies that `voter` cast a vote on `proposalId`.
+SeatToken.refreshActivity(address voter, uint256 proposalId);
+
+// Proposer-based refresh: verifies that `author` is `proposals(proposalId).author`.
+SeatToken.refreshActivityForProposal(address author, uint256 proposalId);
+
+// Batch refresh — all voters on the same proposal, one proposal lookup.
+SeatToken.refreshActivityForProposalVoters(uint256 proposalId, address[] voters);
+
+// Batch refresh — mixed voter/proposal pairs (pays per-entry proposal lookup).
+SeatToken.refreshActivityBatch(address[] voters, uint256[] proposalIds);
+```
+
+Each call:
+
+1. Requires `balanceOf(subject) > 0` (subject is a seatholder).
+2. Reads the Space's `voteRegistry` (vote case) or `proposals` (proposer case) — reverts if the subject didn't actually vote / propose.
+3. Sets `lastActivityAt` to (approximately) the voting-window-close timestamp, capped by `block.timestamp`. This bounds a late refresh from farming extra time. Never moves activity backward.
+
+Anti-farm bound: even if a refresh lands months after the vote, `lastActivityAt` is capped at the estimated close of the voting window (derived from `proposals(id).maxEndBlockNumber` and `AVG_BLOCK_TIME`). Drift is bounded by `maxVotingDuration` (about 3 days at current settings).
+
+### Who typically calls these
+
+Callers are ordered by likelihood:
+
+1. **The voter themselves.** After a vote, submits a follow-up `refreshActivity(msg.sender, proposalId)`. One extra tx.
+2. **A keeper bot.** Subscribes to the Space's `VoteCast(proposalId, voter, ...)` events, batches by proposal, and after voting closes submits one `refreshActivityForProposalVoters(proposalId, voters)` tx. Cheap enough that any single seatholder can run it.
+3. **The frontend.** Bundles the refresh with the vote (either as a follow-up tx or as an EIP-4337 UserOperation). Hides the two-step UX from the voter.
+
+### Interaction with reclaim
+
+`BondingTranche.reclaim` checks `SeatToken.isInactive(holder)` at execution time. If any refresh call landed between proposal creation and reclaim execution, the reclaim reverts (holder is now active). Intended behavior — the refresh mechanism is what keeps active participants safe from reclaim.
 
 ---
 

@@ -115,6 +115,50 @@ This is operationally flexible, but it is generally **more expensive in governan
 
 ---
 
+## Seat reclaim (governance proposal recipes)
+
+`BondingTranche.reclaim(holder)` burns a seat from a holder whose `SeatToken.lastActivityAt` is older than `SeatToken.inactivityPeriod` (365 days at current settings). It's the mechanism that keeps voting supply reflective of the active participant set.
+
+### Why refresh matters before reclaim
+
+Under the current design, **`lastActivityAt` is only updated by the permissionless `SeatToken.refreshActivity*` calls** — voting through the Space no longer refreshes activity as a side effect (see `docs/future-refresh-activity.md`). An active voter therefore looks "inactive" on-chain if nobody has called refresh for them since their last vote. Proposing reclaim against such a holder is technically valid but socially wrong: they participated, the record just hasn't caught up.
+
+**Before submitting a reclaim proposal, the operator MUST close this gap.** Two paths are available and should be used together for defense-in-depth.
+
+### Path A — Refresh before proposing (mandatory pre-flight)
+
+Off-chain, for each holder being considered for reclaim:
+
+1. Scan the Space's `VoteCast(proposalId, voter, ...)` and `ProposalCreated(proposalId, author, ...)` events for any activity by that holder since `now - inactivityPeriod`. Collect the matching `proposalId`s.
+2. If any hit, refresh the on-chain record:
+   - Single hit: `SeatToken.refreshActivity(holder, proposalId)` (or `refreshActivityForProposal(holder, proposalId)` if they authored, not voted).
+   - Multiple hits or a batch of holders: `SeatToken.refreshActivityBatch(voters, proposalIds)` — non-matches are silently skipped, so a mixed batch is safe.
+3. Re-read `SeatToken.isInactive(holder)`. If `false`, **do not propose reclaim**.
+4. If still `true` after refresh, proceed to Path B.
+
+Anyone can run this — the calls are permissionless. In practice this belongs to a keeper (see `docs/future-refresh-activity.md` §"Who calls refreshActivity" case 2), but until a keeper is deployed it's the operator's responsibility.
+
+### Path B — Prepend a defensive refresh to the reclaim payload (recommended)
+
+Even after a clean Path A, wrap the reclaim in a refresh guard so a late vote by the target during the reclaim's own voting window can't be silently ignored.
+
+**Proposal transactions (in order):**
+
+1. `SeatToken.refreshActivityForProposalVoters(recentProposalId, [holder])` — silently no-ops if the holder didn't vote on `recentProposalId`. Pick a proposal that just closed, or the reclaim proposal itself (see note below).
+2. `BondingTranche.reclaim(holder)`.
+
+If the holder actually voted on `recentProposalId`, transaction 1 sets `lastActivityAt`, `isInactive` flips to `false`, and transaction 2 reverts `HolderStillActive`. The whole batch fails and the seat is preserved. If the holder did nothing, transaction 1 is a no-op and the reclaim proceeds.
+
+For a batch reclaim (multiple holders in one proposal), pass all of them into the same `refreshActivityForProposalVoters` call and follow with one `reclaim` per holder.
+
+### The reclaim proposal's own voting window is a refresh opportunity for the target
+
+Independently of the operator's choices, the reclaim proposal has a voting window during which the target can vote (any choice). After that vote lands, **anyone** can call `refreshActivity(target, reclaimProposalId)` before execution. That will make the reclaim revert at execution time.
+
+This is intended behavior — see `docs/future-refresh-activity.md` §Design Decision #8 and `test/integration/EndToEndProposal.t.sol::test_reclaim_evadedByOnTimeVote`. An on-time vote by the target beats a reclaim by construction. Operators shouldn't be surprised when a reclaim proposal passes the vote but reverts at execution: the system is working as designed. If this is a repeated pattern, address it socially (why is the target coming back only to block reclaims?) rather than trying to engineer it away.
+
+---
+
 ## Extend `BondingTranche` sale cap (add tranches)
 
 `BondingTranche` sells seats according to a tranche schedule: each tranche defines an **upper bound** (cumulative seats sold) and a **price per seat**.

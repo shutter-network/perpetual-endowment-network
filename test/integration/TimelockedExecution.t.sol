@@ -56,7 +56,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
     // vm.expectRevert would intercept the Space.execute call and allow execution
     // to continue to executeQueuedProposal on an empty queue.
     function _executeProposal(uint256 proposalId, bytes memory payload) internal override {
-        ISpaceExec(sys.space).execute(proposalId, payload);
+        ISpaceExec(space).execute(proposalId, payload);
         _advance(TIMELOCK_DELAY_SECS + 1);
         TimelockExecutionStrategy(payable(sys.timelockExecutionStrategy)).executeQueuedProposal(payload);
     }
@@ -80,7 +80,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         _advance(MAX_VOTING_DURATION);
 
         vm.expectRevert(abi.encodeWithSelector(bytes4(keccak256("InvalidProposalStatus(uint8)")), uint8(5)));
-        ISpaceExec(sys.space).execute(proposalId, payload);
+        ISpaceExec(space).execute(proposalId, payload);
     }
 
     function test_quorumFails_proposalNotExecutable() public override {
@@ -93,7 +93,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         _advance(MAX_VOTING_DURATION);
 
         vm.expectRevert(abi.encodeWithSelector(bytes4(keccak256("InvalidProposalStatus(uint8)")), uint8(5)));
-        ISpaceExec(sys.space).execute(proposalId, payload);
+        ISpaceExec(space).execute(proposalId, payload);
     }
 
     // ── Override: reclaim evasion via timely vote ──────────────────────────────
@@ -115,11 +115,12 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         _vote(charlie, proposalId, Choice.For);
         _vote(dan, proposalId, Choice.For);
         _vote(bob, proposalId, Choice.Against);
+        SeatToken(sys.seatToken).refreshActivity(bob, proposalId);
 
         assertFalse(SeatToken(sys.seatToken).isInactive(bob));
 
         // Queue the payload in the timelock
-        ISpaceExec(sys.space).execute(proposalId, payload);
+        ISpaceExec(space).execute(proposalId, payload);
 
         // Advance past the delay
         _advance(TIMELOCK_DELAY_SECS + 1);
@@ -147,7 +148,6 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         assertTrue(st.hasRole(st.MINTER_ROLE(), sys.bondingTranche));
         assertTrue(st.hasRole(st.MINTER_ROLE(), address(this))); // test-only minter; granted pre-renounce
         assertTrue(st.hasRole(st.BURNER_ROLE(), sys.bondingTranche));
-        assertTrue(st.hasRole(st.ACTIVITY_ROLE(), sys.penTxAuthenticator));
 
         // PrincipalManager
         assertTrue(pm.hasRole(pm.DEFAULT_ADMIN_ROLE(), sys.safe));
@@ -171,11 +171,11 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         assertEq(IOwnable(sys.executionStrategy).owner(), sys.safe);
 
         // TimelockExecutionStrategy has Space enabled and is owned by Safe
-        assertEq(ISpaceManager(sys.timelockExecutionStrategy).isSpaceEnabled(sys.space), 1);
+        assertEq(ISpaceManager(sys.timelockExecutionStrategy).isSpaceEnabled(space), 1);
         assertEq(IOwnable(sys.timelockExecutionStrategy).owner(), sys.safe);
 
         // Space
-        assertEq(ISpaceExec(sys.space).owner(), sys.safe);
+        assertEq(ISpaceExec(space).owner(), sys.safe);
     }
 
     // ── Timelock-specific tests ────────────────────────────────────────────────
@@ -194,7 +194,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         _vote(charlie, proposalId, Choice.For); // 1 → 4
 
         // Space.execute → TimelockExecutionStrategy.execute → queues the payload hash
-        ISpaceExec(sys.space).execute(proposalId, payload);
+        ISpaceExec(space).execute(proposalId, payload);
 
         // Payload is queued but not yet executed; grantee balance unchanged
         assertEq(grantee.balance, 0);
@@ -222,7 +222,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         _vote(bob, proposalId, Choice.For);
         _vote(charlie, proposalId, Choice.For);
 
-        ISpaceExec(sys.space).execute(proposalId, payload);
+        ISpaceExec(space).execute(proposalId, payload);
 
         // Attempt to execute before delay has elapsed
         vm.expectRevert(bytes4(keccak256("TimelockDelayNotMet()")));

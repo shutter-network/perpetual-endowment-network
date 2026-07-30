@@ -25,7 +25,7 @@ PEN is a minimal on-chain core for a seat-based membership treasury: members buy
 PEN splits governance into two layers:
 
 - **Off-chain (Snapshot, ranked-choice):** members propose candidate slates (recipients + amounts, plus "none of the above") and select a single *winning slate* via ranked-choice voting.
-- **On-chain (Snapshot X / EVM, YES/NO):** a member submits a proposal encoding the winning slate as executable transactions via `PENTxAuthenticator`; seat holders vote using the stock `OZVotesVotingStrategy` (backed by `SeatToken.getPastVotes`); after the optional timelock, the proposal executes through `AvatarExecutionStrategy` → Safe.
+- **On-chain (Snapshot X / EVM, YES/NO):** a member submits a proposal encoding the winning slate as executable transactions via the Space's whitelisted authenticator (stock `EthTxAuthenticator` at deploy; the DAO may enable additional stock authenticators such as `EthSigAuthenticator` later via a governance-owned `Space.updateSettings` call); seat holders vote using the stock `OZVotesVotingStrategy` (backed by `SeatToken.getPastVotes`); after the optional timelock, the proposal executes through `AvatarExecutionStrategy` → Safe.
 
 For PEN treasury batch payouts, the canonical execution call is `PrincipalManager.executeFunding(recipients, amounts)` — a single batched primitive that is materially cheaper under Snapshot X execution than `withdraw + N transfers`.
 
@@ -35,7 +35,7 @@ Further reading: [`docs/flows.md`](docs/flows.md), [`docs/pen-operator-guide.md`
 
 | Contract | Role |
 | --- | --- |
-| `SeatToken` | Non-transferable `ERC20Votes` seat token, `decimals = 0`. Governance voting refreshes seat activity. |
+| `SeatToken` | Non-transferable `ERC20Votes` seat token, `decimals = 0`. Governance participation is refreshed via `refreshActivity` (see below). |
 | `BondingTranche` | Seat sale (tranche-based pricing), fixed-price refund, inactivity reclaim. |
 | `PrincipalManager` | Principal treasury controller: refund liquidity, principal accounting, ERC-4626 vault integration. |
 
@@ -46,11 +46,14 @@ Further reading: [`docs/flows.md`](docs/flows.md), [`docs/pen-operator-guide.md`
 | `SeatToken` | `DEFAULT_ADMIN_ROLE` | **Unheld** — renounced at deploy. No party can reroute the roles below. |
 | `SeatToken` | `MINTER_ROLE` | `BondingTranche` (mint on purchase) — frozen at deploy |
 | `SeatToken` | `BURNER_ROLE` | `BondingTranche` (burn on refund/reclaim) — frozen at deploy |
-| `SeatToken` | `ACTIVITY_ROLE` | `PENTxAuthenticator` (refresh activity on propose/vote) — frozen at deploy |
 | `BondingTranche` | `DEFAULT_ADMIN_ROLE` | Governance Safe |
 | `BondingTranche` | `RECLAIMER_ROLE` | Authorized reclaimer |
 | `PrincipalManager` | `DEFAULT_ADMIN_ROLE` | Governance Safe |
 | `PrincipalManager` | `BONDING_ROLE` | `BondingTranche` (record purchases, trigger refunds) |
+
+**Seat activity**
+
+Seat activity is refreshed via the permissionless `SeatToken.refreshActivity(voter, proposalId)` (and the proposer-side companion `refreshActivityForProposal(author, proposalId)`). Each call verifies the vote or proposal against the Space's on-chain `voteRegistry` / `proposals` mapping — no role, no trusted contract, no admin surface. Any vote through any whitelisted authenticator (`EthTx`, `EthSig`, or a future one) is refreshable. See `docs/flows.md` §Activity refresh flow for who typically calls these and the batching primitives.
 
 **Treasury accounting**
 
@@ -221,7 +224,7 @@ Reclaims also reduce total supply, moving pricing backward.
 ### Yield Funding
 
 1. Off-chain (Snapshot, ranked-choice): community selects a winning slate (recipients + amounts).
-2. On-chain (Snapshot X / EVM): a member creates a proposal encoding `PrincipalManager.executeFunding(recipients, amounts)` via `PENTxAuthenticator`.
+2. On-chain (Snapshot X / EVM): a member creates a proposal encoding `PrincipalManager.executeFunding(recipients, amounts)` via the Space's whitelisted authenticator (stock `EthTxAuthenticator` by default).
 3. Seat holders vote YES/NO. Simple majority (For > Against) with quorum met makes the proposal executable.
 4. After the optional timelock, the proposal executes via `AvatarExecutionStrategy` → Safe: `PrincipalManager` pays from liquid assets first, withdrawing the shortfall from `principalVault` as needed.
 5. `accountedPrincipal` is unchanged — funding pays from yield, not from the principal obligation.

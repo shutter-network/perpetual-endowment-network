@@ -11,11 +11,8 @@ import {console2} from "forge-std/console2.sol";
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
 import {SeatToken} from "../src/SeatToken.sol";
-import {PENTxAuthenticator} from "../src/governance/PENTxAuthenticator.sol";
-import {ISeatToken} from "../src/interfaces/ISeatToken.sol";
 import {PENSafeBootstrap} from "../src/deployment/PENSafeBootstrap.sol";
 
-import {Strategy, InitializeCalldata} from "@snapshot-x/types.sol";
 import {IProxyFactory} from "@snapshot-x/interfaces/IProxyFactory.sol";
 import {AvatarExecutionStrategy} from "@snapshot-x/execution-strategies/AvatarExecutionStrategy.sol";
 import {TimelockExecutionStrategy} from "@snapshot-x/execution-strategies/timelocks/TimelockExecutionStrategy.sol";
@@ -36,18 +33,6 @@ interface IOwnable {
     function owner() external view returns (address);
 }
 
-// Minimal Space initializer declared locally rather than imported from ISpaceActions.
-// ISpaceActions.sol uses a bare "src/types.sol" import that solc assigns a different
-// source unit ID than our remapped import, causing abi.encodeCall to reject the type.
-// Declaring the interface against the already imported InitializeCalldata eliminates the conflict.
-// TODO(upstream-fix): once snapshot-labs/sx-evm replaces bare "src/types.sol" imports
-// with relative imports, delete this local stub and replace the abi.encodeCall below with:
-//   import {ISpaceActions} from "@snapshot-x/interfaces/space/ISpaceActions.sol";
-//   abi.encodeCall(ISpaceActions.initialize, (spaceInit))
-interface ISpace {
-    function initialize(InitializeCalldata calldata input) external;
-}
-
 abstract contract PENDeploymentHelper {
     error UnexpectedDeploymentAddress(bytes32 component, address expected, address actual);
 
@@ -64,13 +49,17 @@ abstract contract PENDeploymentHelper {
         uint256[] tranchePrices;
     }
 
+    /// @dev The Space-parameter fields below (voting durations, threshold, canonical strategy /
+    ///      authenticator addresses) are no longer consumed by Phase 1 — the Space is created
+    ///      by the operator via `snapshot.box` in Phase 2. They remain in the config so
+    ///      `VerifyPENSystem` can cross-check the deployed Space against the intended values.
     struct GovernanceConfig {
         address sxProxyFactory;
-        address sxMasterSpace;
         address sxAvatarImpl;
         address sxTimelockImpl;
         address sxPropositionPowerValidation;
         address sxOzVotesStrategy;
+        address sxEthTxAuthenticator;
         uint32 votingDelay;
         uint32 minVotingDuration;
         uint32 maxVotingDuration;
@@ -85,6 +74,9 @@ abstract contract PENDeploymentHelper {
         GovernanceConfig governance;
     }
 
+    /// @dev Phase 1 outputs. The Space is deployed out-of-band via `snapshot.box` and bound
+    ///      to SeatToken by `script/BootstrapPEN.s.sol` (Phase 2), which appends the resulting
+    ///      `space` address to the on-disk artifact.
     struct DeploymentAddresses {
         address safeSingleton;
         address safeProxyFactory;
@@ -93,8 +85,6 @@ abstract contract PENDeploymentHelper {
         address seatToken;
         address principalManager;
         address bondingTranche;
-        address penTxAuthenticator;
-        address space; // Snapshot X Space, cloned from sxMasterSpace
         address executionStrategy; // AvatarExecutionStrategy proxy
         address timelockExecutionStrategy; // TimelockExecutionStrategy proxy; 0x0 if disabled
     }
@@ -132,13 +122,8 @@ abstract contract PENDeploymentHelper {
         predicted_.seatToken = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.principalManager = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.bondingTranche = _computeCreateAddress(deployer_, nextNonce++);
-        predicted_.penTxAuthenticator = _computeCreateAddress(deployer_, nextNonce++);
-
-        uint256 spaceSaltNonce = config_.governance.timelockEnabled ? 2 : 1;
-        nextNonce++; // space proxy tx
-        predicted_.space = _computeProxyAddress(
-            config_.governance.sxProxyFactory, config_.governance.sxMasterSpace, deployer_, spaceSaltNonce
-        );
+        // No Space nonce-slot: the Space is deployed via `snapshot.box` in Phase 2 with a
+        // salt the UI controls, so it cannot be pre-derived from the deployer's nonce here.
     }
 
     // ── Deployment ─────────────────────────────────────────────────────────────────────
@@ -175,16 +160,9 @@ abstract contract PENDeploymentHelper {
         (deployed_.seatToken, deployed_.principalManager, deployed_.bondingTranche) =
             _deployCoreContracts(expected_, config_, bootstrapAuthority_);
 
-        // Step 11: PENTxAuthenticator
-        deployed_.penTxAuthenticator = address(new PENTxAuthenticator(ISeatToken(deployed_.seatToken), expected_.space));
-        _assertDeployedAddress("PEN_TX_AUTHENTICATOR", expected_.penTxAuthenticator, deployed_.penTxAuthenticator);
-
-        // Step 12: Space proxy
-        deployed_.space = _deploySpace(deployed_, config_, bootstrapAuthority_);
-        _assertDeployedAddress("SPACE", expected_.space, deployed_.space);
-
-        // Steps 13–15: Wire whitelists, transfer ownership, finalise roles
-        _initializeGovernance(deployed_);
+        // Step 11: Finalise access on SeatToken / PrincipalManager / BondingTranche. Space
+        // binding (`SeatToken.setSpace`) and exec-strategy `enableSpace` + ownership transfer
+        // happen in Phase 2 (`script/BootstrapPEN.s.sol`), because the Space does not exist yet.
         _finalizeAccess(deployed_, bootstrapAuthority_);
 
         return expected_;
@@ -244,7 +222,8 @@ abstract contract PENDeploymentHelper {
                 bootstrapAuthority_,
                 address(0),
                 address(0),
-                address(0) // ACTIVITY_ROLE: granted to PENTxAuthenticator in _finalizeAccess
+                bootstrapAuthority_, // bootstrap: consumes itself in setSpace after Space is deployed
+                expected_.safe // expectedOwner: setSpace verifies the Space's owner() matches this
             )
         );
         _assertDeployedAddress("SEAT_TOKEN", expected_.seatToken, seatToken_);
@@ -274,77 +253,6 @@ abstract contract PENDeploymentHelper {
         _assertDeployedAddress("BONDING_TRANCHE", expected_.bondingTranche, bondingTranche_);
     }
 
-    function _deploySpace(DeploymentAddresses memory deployed_, DeploymentConfig memory config_, address deployer_)
-        internal
-        returns (address space_)
-    {
-        // Stock `OZVotesVotingStrategy` decodes its params via `address(bytes20(params))`,
-        // which is the raw 20-byte encoding (`abi.encodePacked`), not the 32-byte padded
-        // `abi.encode`.
-        bytes memory ozVotesParams = abi.encodePacked(deployed_.seatToken);
-
-        Strategy[] memory votingStrategies = new Strategy[](1);
-        votingStrategies[0] = Strategy({addr: config_.governance.sxOzVotesStrategy, params: ozVotesParams});
-
-        // PropositionPower params: (threshold, allowedStrategies[])
-        Strategy[] memory propPowerStrategies = new Strategy[](1);
-        propPowerStrategies[0] = Strategy({addr: config_.governance.sxOzVotesStrategy, params: ozVotesParams});
-
-        string[] memory votingStrategyMetadataURIs = new string[](1);
-        votingStrategyMetadataURIs[0] = "";
-
-        address[] memory authenticators = new address[](1);
-        authenticators[0] = deployed_.penTxAuthenticator;
-
-        InitializeCalldata memory spaceInit = InitializeCalldata({
-            owner: deployed_.safe,
-            votingDelay: config_.governance.votingDelay,
-            minVotingDuration: config_.governance.minVotingDuration,
-            maxVotingDuration: config_.governance.maxVotingDuration,
-            proposalValidationStrategy: Strategy({
-                addr: config_.governance.sxPropositionPowerValidation,
-                params: abi.encode(config_.governance.proposerSeatThreshold, propPowerStrategies)
-            }),
-            proposalValidationStrategyMetadataURI: "",
-            daoURI: "",
-            metadataURI: "",
-            votingStrategies: votingStrategies,
-            votingStrategyMetadataURIs: votingStrategyMetadataURIs,
-            authenticators: authenticators
-        });
-
-        uint256 spaceSaltNonce = config_.governance.timelockEnabled ? 2 : 1;
-        IProxyFactory(config_.governance.sxProxyFactory)
-            .deployProxy(
-                config_.governance.sxMasterSpace, abi.encodeCall(ISpace.initialize, (spaceInit)), spaceSaltNonce
-            );
-
-        space_ = _computeProxyAddress(
-            config_.governance.sxProxyFactory, config_.governance.sxMasterSpace, deployer_, spaceSaltNonce
-        );
-    }
-
-    function _initializeGovernance(DeploymentAddresses memory deployed_) internal {
-        // The Space directly calls either the timelock (if enabled) or the avatar.
-        address spaceExecutionTarget = deployed_.timelockExecutionStrategy != address(0)
-            ? deployed_.timelockExecutionStrategy
-            : deployed_.executionStrategy;
-
-        // Space → spaceExecutionTarget
-        ISpaceManager(spaceExecutionTarget).enableSpace(deployed_.space);
-
-        // If timelock wraps avatar: timelock → avatar
-        if (deployed_.timelockExecutionStrategy != address(0)) {
-            ISpaceManager(deployed_.executionStrategy).enableSpace(deployed_.timelockExecutionStrategy);
-        }
-
-        // Transfer execution strategy ownership from deployer to Safe
-        IOwnable(deployed_.executionStrategy).transferOwnership(deployed_.safe);
-        if (deployed_.timelockExecutionStrategy != address(0)) {
-            IOwnable(deployed_.timelockExecutionStrategy).transferOwnership(deployed_.safe);
-        }
-    }
-
     function _finalizeAccess(DeploymentAddresses memory deployed_, address bootstrapAuthority_) internal {
         SeatToken seatToken = SeatToken(deployed_.seatToken);
         PrincipalManager principalManager = PrincipalManager(deployed_.principalManager);
@@ -352,12 +260,12 @@ abstract contract PENDeploymentHelper {
 
         seatToken.grantRole(seatToken.MINTER_ROLE(), deployed_.bondingTranche);
         seatToken.grantRole(seatToken.BURNER_ROLE(), deployed_.bondingTranche);
-        seatToken.grantRole(seatToken.ACTIVITY_ROLE(), deployed_.penTxAuthenticator);
         // `DEFAULT_ADMIN_ROLE` is intentionally NOT granted to the Safe before the deployer
         // renounces. SeatToken has no admin-gated operational functions — `DEFAULT_ADMIN_ROLE`
         // there only controls role reassignment. Leaving it unheld permanently freezes the
-        // MINTER / BURNER / ACTIVITY assignments above, so a captured governance majority
-        // can never re-route mint/burn rights to confiscate or dilute seats.
+        // MINTER / BURNER assignments above, so a captured governance majority can never
+        // re-route mint/burn rights to confiscate or dilute seats. Activity refresh is
+        // permissionless (onchain-verified via `Space.voteRegistry`) and needs no role.
         // PrincipalManager and BondingTranche keep their Safe-held admin roles because they
         // gate real governance operations (executeFunding, extendTranches, asset migration).
         seatToken.renounceRole(seatToken.DEFAULT_ADMIN_ROLE(), bootstrapAuthority_);
@@ -453,11 +361,11 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
         bool timelockEnabled_ = _envBoolOrFalse("TIMELOCK_ENABLED");
         config.governance = GovernanceConfig({
             sxProxyFactory: vm.envAddress("SX_PROXY_FACTORY"),
-            sxMasterSpace: vm.envAddress("SX_MASTER_SPACE"),
             sxAvatarImpl: vm.envAddress("SX_AVATAR_IMPL"),
             sxTimelockImpl: vm.envAddress("SX_TIMELOCK_IMPL"),
             sxPropositionPowerValidation: vm.envAddress("SX_PROPOSITION_POWER_VALIDATION"),
             sxOzVotesStrategy: vm.envAddress("SX_OZ_VOTES_STRATEGY"),
+            sxEthTxAuthenticator: vm.envAddress("SX_ETH_TX_AUTHENTICATOR"),
             votingDelay: uint32(vm.envUint("VOTING_DELAY")),
             minVotingDuration: uint32(vm.envUint("MIN_VOTING_DURATION")),
             maxVotingDuration: uint32(vm.envUint("MAX_VOTING_DURATION")),
@@ -518,12 +426,13 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
         console2.log("SeatToken:                 ", d_.seatToken);
         console2.log("PrincipalManager:          ", d_.principalManager);
         console2.log("BondingTranche:            ", d_.bondingTranche);
-        console2.log("PENTxAuthenticator:        ", d_.penTxAuthenticator);
-        console2.log("Space:                     ", d_.space);
         console2.log("ExecutionStrategy:         ", d_.executionStrategy);
         console2.log("TimelockExecutionStrategy: ", d_.timelockExecutionStrategy);
     }
 
+    /// @dev Writes the Phase 1 deployment artifact. `space` is emitted as the zero address
+    ///      and `phase2Pending: true` marks the artifact as awaiting `script/BootstrapPEN.s.sol`.
+    ///      `BootstrapPEN` rewrites this file with the real Space address and removes the flag.
     function _writeDeploymentArtifact(DeploymentAddresses memory d_) internal {
         string memory json = string.concat(
             "{\n",
@@ -548,18 +457,16 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
             '  "bondingTranche": "',
             vm.toString(d_.bondingTranche),
             '",\n',
-            '  "penTxAuthenticator": "',
-            vm.toString(d_.penTxAuthenticator),
-            '",\n',
             '  "space": "',
-            vm.toString(d_.space),
+            vm.toString(address(0)),
             '",\n',
             '  "executionStrategy": "',
             vm.toString(d_.executionStrategy),
             '",\n',
             '  "timelockExecutionStrategy": "',
             vm.toString(d_.timelockExecutionStrategy),
-            '"\n',
+            '",\n',
+            '  "phase2Pending": true\n',
             "}"
         );
 

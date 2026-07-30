@@ -5,6 +5,9 @@ out/
 # Broadcast artifacts
 broadcast/
 
+# Transient verifier output (written by script/verify-pen.sh)
+deployments/.pen-verify-derived.json
+
 # Dependencies
 lib/**/node_modules/
 

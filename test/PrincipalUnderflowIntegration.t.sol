@@ -32,7 +32,9 @@ contract PrincipalUnderflowIntegrationTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC();
-        seatToken = new SeatToken("PEN Seat", "SEAT", SEAT_COUNT, 365 days, admin, address(0), address(0), address(0));
+        seatToken = new SeatToken(
+            "PEN Seat", "SEAT", SEAT_COUNT, 365 days, admin, address(0), address(0), address(0), address(0)
+        );
         principalManager = new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)));
         principalVault = new ERC4626Mock(address(usdc));
 
