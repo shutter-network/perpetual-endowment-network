@@ -15,7 +15,7 @@ import {EndToEndProposalTest, ISpaceExec} from "./EndToEndProposal.t.sol";
 
 // Inherits all 13 EndToEndProposalTest tests and runs them through a 1-day timelock.
 // Key differences from the base setup:
-//  - sys.timelockExecutionStrategy is used as the proposal execution strategy
+//  - execStrategy is used as the proposal execution strategy
 //  - TimelockExecutionStrategy.executeQueuedProposal executes MetaTransactions directly
 //    (not via Safe), so the TimelockExecutionStrategy itself is funded with ETH
 //  - _executeProposal is overridden to: queue via Space.execute, advance past the delay,
@@ -34,7 +34,17 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         // Fund the TimelockExecutionStrategy directly for ETH transfer tests.
         // Unlike AvatarExecutionStrategy (which routes calls through Safe), the timelock
         // executes MetaTransactions from its own context, so it must hold the ETH itself.
-        vm.deal(sys.timelockExecutionStrategy, 1 ether);
+        vm.deal(execStrategy, 1 ether);
+
+        // The timelock calls BondingTranche.reclaim directly (bypassing the Safe), so
+        // it needs RECLAIMER_ROLE. In production a governance proposal would grant this;
+        // here we grant it directly from the Safe (the DEFAULT_ADMIN_ROLE holder). Resolve
+        // the role bytes32 outside the prank — RECLAIMER_ROLE() is an external call that
+        // would otherwise consume the single-use prank before grantRole is reached.
+        BondingTranche bt = BondingTranche(sys.bondingTranche);
+        bytes32 reclaimerRole = bt.RECLAIMER_ROLE();
+        vm.prank(sys.safe);
+        bt.grantRole(reclaimerRole, execStrategy);
 
         // MINTER_ROLE for this test contract was granted during _deploySpaceAndFinalize,
         // before DEFAULT_ADMIN_ROLE on SeatToken was renounced. See that helper for context.
@@ -58,7 +68,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
     function _executeProposal(uint256 proposalId, bytes memory payload) internal override {
         ISpaceExec(space).execute(proposalId, payload);
         _advance(TIMELOCK_DELAY_SECS + 1);
-        TimelockExecutionStrategy(payable(sys.timelockExecutionStrategy)).executeQueuedProposal(payload);
+        TimelockExecutionStrategy(payable(execStrategy)).executeQueuedProposal(payload);
     }
 
     // ── Override: rejected proposals never enter the timelock ─────────────────
@@ -128,7 +138,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         // executeQueuedProposal calls BondingTranche.reclaim(bob) directly via low-level
         // call. Since isInactive(bob)==false, the call fails → ExecutionFailed() is thrown.
         vm.expectRevert(bytes4(keccak256("ExecutionFailed()")));
-        TimelockExecutionStrategy(payable(sys.timelockExecutionStrategy)).executeQueuedProposal(payload);
+        TimelockExecutionStrategy(payable(execStrategy)).executeQueuedProposal(payload);
 
         assertEq(SeatToken(sys.seatToken).balanceOf(bob), 1);
     }
@@ -160,19 +170,18 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         assertTrue(bt.hasRole(bt.RECLAIMER_ROLE(), sys.safe));
         assertFalse(bt.hasRole(bt.RECLAIMER_ROLE(), address(this)));
 
-        // In timelocked mode the Safe enables TimelockExecutionStrategy as its module
-        // (not AvatarExecutionStrategy). See _safeInitializer: moduleToEnable = timelockExec.
-        assertTrue(Safe(payable(sys.safe)).isModuleEnabled(sys.timelockExecutionStrategy));
-
-        // AvatarExecutionStrategy has TimelockExecutionStrategy enabled as a "space"
-        // (AvatarExec is in the deployment but not on the hot execution path when a
-        // timelocked strategy is used — Space.execute goes directly to TimelockExec).
-        assertEq(ISpaceManager(sys.executionStrategy).isSpaceEnabled(sys.timelockExecutionStrategy), 1);
-        assertEq(IOwnable(sys.executionStrategy).owner(), sys.safe);
+        // In timelocked mode the UI wizard deploys a `TimelockExecutionStrategy` as the sole
+        // exec strategy; the Safe both owns it and enables it as its module. `Space.execute`
+        // queues into it; `executeQueuedProposal` runs MetaTransactions directly from the
+        // timelock. There is no separate AvatarExecutionStrategy anymore.
+        assertTrue(Safe(payable(sys.safe)).isModuleEnabled(execStrategy));
+        address[] memory safeOwners = Safe(payable(sys.safe)).getOwners();
+        assertEq(safeOwners.length, 1);
+        assertEq(safeOwners[0], execStrategy);
 
         // TimelockExecutionStrategy has Space enabled and is owned by Safe
-        assertEq(ISpaceManager(sys.timelockExecutionStrategy).isSpaceEnabled(space), 1);
-        assertEq(IOwnable(sys.timelockExecutionStrategy).owner(), sys.safe);
+        assertEq(ISpaceManager(execStrategy).isSpaceEnabled(space), 1);
+        assertEq(IOwnable(execStrategy).owner(), sys.safe);
 
         // Space
         assertEq(ISpaceExec(space).owner(), sys.safe);
@@ -203,7 +212,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
         _advance(TIMELOCK_DELAY_SECS + 1);
 
         // Execute the queued proposal
-        TimelockExecutionStrategy(payable(sys.timelockExecutionStrategy)).executeQueuedProposal(payload);
+        TimelockExecutionStrategy(payable(execStrategy)).executeQueuedProposal(payload);
 
         assertEq(grantee.balance, 0.1 ether);
     }
@@ -226,7 +235,7 @@ contract TimelockedExecutionTest is EndToEndProposalTest {
 
         // Attempt to execute before delay has elapsed
         vm.expectRevert(bytes4(keccak256("TimelockDelayNotMet()")));
-        TimelockExecutionStrategy(payable(sys.timelockExecutionStrategy)).executeQueuedProposal(payload);
+        TimelockExecutionStrategy(payable(execStrategy)).executeQueuedProposal(payload);
 
         assertEq(grantee.balance, 0);
     }

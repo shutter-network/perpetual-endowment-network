@@ -110,18 +110,17 @@ The **Core config** and **Governance config** sections are pre-populated with th
 
 ### Deployment
 
-The repo provides two scripts:
+Deployment is split into two phases because the Snapshot X `Space` is created via the [`snapshot.box`](https://snapshot.box/#/create/snapshot-x) UI, whose form does not expose the `ProxyFactory` `saltNonce` needed to pre-derive the Space address from the deployer sequence.
 
-- [`script/PreviewPENSystem.s.sol`](script/PreviewPENSystem.s.sol) — predicts the full address plan from the deployer, its current nonce, and `DEPLOYMENT_SALT` without broadcasting.
-- [`script/DeployPENSystem.s.sol`](script/DeployPENSystem.s.sol) — deploys the Safe singleton, Safe proxy factory, Safe bootstrap helper, governance stack, and core treasury contracts in a single run, then hands all admin / executor / reclaimer roles to the new Safe.
+- **Phase 1 (scripted)** — deploy the Safe (owner = deployer EOA, threshold = 1, no module), `SeatToken`, `PrincipalManager`, and `BondingTranche`, and hand admin/reclaimer roles to the new Safe. The Space and its execution strategy are **not** created here.
+- **Phase 2 (UI + scripted finalize)** — operator creates the Space via `snapshot.box` (the wizard deploys a fresh `AvatarExecutionStrategy` or `TimelockExecutionStrategy` as part of the Space-creation tx). A small finalize script then binds the Space to `SeatToken`, enables the UI-deployed exec strategy as a Safe module, and swaps it in as the Safe's sole owner.
 
-The deploy script internally:
+The scripts involved:
 
-1. derives the deployer address and current nonce,
-2. deterministically predicts every contract address from that sequence + `DEPLOYMENT_SALT`,
-3. deploys all contracts in the predicted order,
-4. creates the Safe with the Snapshot X `AvatarExecutionStrategy` module enabled during `Safe.setup`,
-5. initializes the Snapshot X Space and transfers all admin / executor / reclaimer control to the Safe.
+- [`script/PreviewPENSystem.s.sol`](script/PreviewPENSystem.s.sol) — Phase 1 dry-run. Predicts the full address plan from the deployer, its current nonce, and `DEPLOYMENT_SALT` without broadcasting.
+- [`script/DeployPENSystem.s.sol`](script/DeployPENSystem.s.sol) — Phase 1 broadcast. Writes `deployments/<chainId>.json` marked `phase2Pending: true`.
+- [`script/PreviewSpaceBinding.s.sol`](script/PreviewSpaceBinding.s.sol) — Phase 2 pre-flight. Reads the candidate Space (via `PHASE2_SPACE_ADDRESS`) and prints owner, authenticators, voting strategies, proposal validation strategy, and voting-window params for human eyeballing.
+- [`script/BootstrapPEN.s.sol`](script/BootstrapPEN.s.sol) — Phase 2 broadcast. Runs `SeatToken.setSpace`, submits a Safe transaction to `enableModule(execStrategy)`, then a second Safe transaction to `swapOwner(SENTINEL, deployer, execStrategy)`. Rewrites the artifact with the resolved `space` and `execStrategy` addresses and drops the `phase2Pending` flag.
 
 #### Step 1 — Load the environment
 
@@ -131,7 +130,7 @@ After completing [Environment configuration](#environment-configuration), load t
 set -a; source .env; set +a
 ```
 
-#### Step 2 — Preview the deployment
+#### Step 2 — Preview Phase 1
 
 Run the preview against the **exact deployer address** you intend to broadcast from:
 
@@ -139,7 +138,7 @@ Run the preview against the **exact deployer address** you intend to broadcast f
 forge script script/PreviewPENSystem.s.sol:PreviewPENSystem --rpc-url "$RPC_URL"
 ```
 
-The preview prints the deployer, starting nonce, and every predicted contract address (Safe singleton, Safe proxy factory, Safe bootstrap helper, Safe, `SeatToken`, `PrincipalManager`, `BondingTranche`, governance stack).
+The preview prints the deployer, starting nonce, and every predicted Phase 1 address (Safe singleton, Safe proxy factory, Safe, `SeatToken`, `PrincipalManager`, `BondingTranche`).
 
 #### Step 3 — Verify the predicted addresses
 
@@ -149,9 +148,7 @@ Confirm:
 - the starting nonce matches the deployer's current on-chain nonce,
 - the predicted Safe address is what you expect (it is bound to `DEPLOYMENT_SALT`).
 
-#### Step 4 — Broadcast
-
-Deploy in a single run:
+#### Step 4 — Broadcast Phase 1
 
 ```sh
 forge script script/DeployPENSystem.s.sol:DeployPENSystem \
@@ -159,37 +156,191 @@ forge script script/DeployPENSystem.s.sol:DeployPENSystem \
   --broadcast
 ```
 
-On success, the script logs every deployed address. Broadcast artifacts are written under `broadcast/DeployPENSystem.s.sol/<chainId>/`.
+On success the script logs every deployed address and writes `deployments/<chainId>.json` with `phase2Pending: true`. Broadcast artifacts are additionally emitted under `broadcast/DeployPENSystem.s.sol/<chainId>/`.
 
-#### Step 5 — (Optional) Verify on a block explorer
+Append `--verify --etherscan-api-key "$ETHERSCAN_API_KEY"` to have Foundry submit source verification for every Phase 1 contract (or run `forge verify-contract` per address afterwards).
 
-Append `--verify --etherscan-api-key "$ETHERSCAN_API_KEY"` to the broadcast command (or run `forge verify-contract` per address afterwards).
+**Operational caveat — nonce binding.** Address prediction is bound to the deployer's nonce. **Any other transaction from the deployer between preview and broadcast invalidates every predicted address**, including the Safe address. Use a dedicated, otherwise-idle account for deployment, and broadcast immediately after previewing.
 
-#### Operational caveat — nonce binding
+#### Step 5 — Create the Space via `snapshot.box`
 
-Address prediction is bound to the deployer's nonce. **Any other transaction from the deployer between preview and broadcast invalidates every predicted address**, including the Safe address. Use a dedicated, otherwise-idle account for deployment, and broadcast immediately after previewing.
+Open [`https://snapshot.box/#/create/snapshot-x`](https://snapshot.box/#/create/snapshot-x), connect the deployer EOA (or the Safe), and walk through the eight-step wizard. Values below are the canonical **Shutter PEN** defaults from `.env.example`; substitute Phase 1 addresses from `deployments/<chainId>.json` where indicated.
+
+| Step | Field | Value |
+| --- | --- | --- |
+| **Profile** | Space name | `Shutter - PEN` (or your chosen display name) |
+| | Avatar / cover | Upload images in the UI |
+| | Description | Free text |
+| | External URL / socials | Optional |
+| | Voting power symbol | `SEAT` |
+| **Network** | Space network | `Ethereum` (mainnet), matching your RPC |
+| **Strategies** | Voting strategy | `OZ Votes` — token = `deployments/<chainId>.json → seatToken` |
+| **Proposal validation** | Strategy | `Proposition power` — threshold = `1`, allowed voting strategies = the `OZ Votes` entry from the previous step |
+| **Executions** | Strategy type | `Safe module (Zodiac)` if `TIMELOCK_ENABLED=false`, else `Timelock` |
+| | Controller address | `deployments/<chainId>.json → safe` (makes the freshly-deployed exec strategy Safe-owned from the get-go) |
+| | Quorum | `10` (`AVATAR_QUORUM`) |
+| | Safe address *(Avatar only)* | `deployments/<chainId>.json → safe` |
+| | Veto guardian address *(Timelock only)* | Leave blank (defaults to `0x0000…0000`) |
+| | Timelock delay *(Timelock only)* | `1 day` (`TIMELOCK_DELAY = 86400`) |
+| **Auths** | Authenticator | `EthTx` only (stock `EthTxAuthenticator`) |
+| **Voting** | Voting delay | `1 day` (`VOTING_DELAY = 86400`) |
+| | Min voting duration | `3 days` (`MIN_VOTING_DURATION = 259200`) |
+| | Max voting duration | `3 days` (`MAX_VOTING_DURATION = 259200`) |
+| **Controller** | Controller | `deployments/<chainId>.json → safe` |
+
+Reference addresses (mainnet, from `.env.example`; verify against `lib/sx-evm/deployments/1.json` before use):
+
+- `OZ Votes` strategy — `0x2c8631584474E750CEdF2Fb6A904f2e84777Aefe`
+- `Proposition power` validation — `0x6D9d6D08EF6b26348Bd18F1FC8D953696b7cf311`
+- `EthTx` authenticator — `0xBA06E6cCb877C332181A6867c05c8b746A21Aed1`
+
+`snapshot.box` pins the Profile / strategy metadata JSONs to IPFS on submit — no manual pin step is needed for a fresh deploy.
+
+> **Reading Phase 1 addresses out of the artifact.** Every field in the table above that says "`deployments/<chainId>.json → X`" lives in the JSON that Phase 1 wrote. Get them all with:
+>
+> ```sh
+> jq '{safe, seatToken}' deployments/<chainId>.json
+> ```
+
+#### Step 6 — Retrieve the Space and exec-strategy addresses
+
+The wizard submits **two consecutive transactions** from your wallet (same signer, consecutive nonces, usually the same block):
+
+1. **Exec-strategy deploy** — `ProxyFactory.deployProxy(execImpl, initData, saltNonce)` where `execImpl` is the SX `AvatarExecutionStrategy` (or `TimelockExecutionStrategy` when `TIMELOCK_ENABLED=true`). The Space address is pre-computed and included in the exec strategy's `spaces` init list.
+2. **Space deploy** — `ProxyFactory.deployProxy(spaceImpl, spaceInit, spaceSaltNonce)`.
+
+Both target the SX `ProxyFactory` (`$SX_PROXY_FACTORY`) and each emits `ProxyDeployed(address implementation, address proxy)`. **Neither field is indexed**, so both live in the log `data` (event-selector topic `0x3d2489efb661e8b1c3679865db649ca1de61d76a71184a1234de2e55786a6aad`).
+
+Grab both tx hashes from your wallet history (the two most recent from the sender that talk to `$SX_PROXY_FACTORY`), then run the extractor on each:
+
+```sh
+for TX in <exec-strategy-tx> <space-tx>; do
+  echo "--- $TX ---"
+  cast receipt "$TX" --rpc-url "$RPC_URL" --json \
+    | jq -r --arg pf "$(echo "$SX_PROXY_FACTORY" | tr 'A-Z' 'a-z')" '
+        .logs[]
+        | select((.address | ascii_downcase) == $pf)
+        | select(.topics[0] == "0x3d2489efb661e8b1c3679865db649ca1de61d76a71184a1234de2e55786a6aad")
+        | {implementation: ("0x" + .data[26:66]), proxy: ("0x" + .data[90:130])}'
+done
+```
+
+Match `implementation` against the canonical SX impls (from `.env.example` or `lib/sx-evm/deployments/<chainId>.json`) to know which tx produced which proxy:
+
+- `implementation` == the Space impl address on that chain → `proxy` is your **`PHASE2_SPACE_ADDRESS`**.
+- `implementation` == `SX_AVATAR_IMPL` (or `SX_TIMELOCK_IMPL` when `TIMELOCK_ENABLED=true`) → `proxy` is your **`PHASE2_EXEC_STRATEGY_ADDRESS`**.
+
+If you only have one of the two tx hashes, the other is the sender's tx at nonce ±1 — the explorer's "Transactions" tab for the sender shows both back-to-back.
+
+**Quick sanity check** — call `owner()` on each proxy:
+
+```sh
+cast call <proxy> "owner()(address)" --rpc-url "$RPC_URL"
+```
+
+Both should return the Safe (`deployments/<chainId>.json → safe`). The Space additionally exposes `votingDelay()`; the exec strategy exposes `quorum()` (Avatar) or `timelockDelay()` (Timelock).
+
+Alternatively, the Space address is also visible in the URL `snapshot.box` navigates to after submit — `#/eth:0x<space>` on mainnet, `#/sep:0x<space>` on Sepolia — but the exec-strategy address only surfaces from the on-chain receipt.
+
+Export both for the next steps:
+
+```sh
+export PHASE2_SPACE_ADDRESS=0x<space>
+export PHASE2_EXEC_STRATEGY_ADDRESS=0x<exec-strategy>
+```
+
+#### Step 7 — Preview the candidate Space
+
+Optional but recommended sanity check before the finalize broadcast (uses `PHASE2_SPACE_ADDRESS` from Step 6):
+
+```sh
+forge script script/PreviewSpaceBinding.s.sol --rpc-url "$RPC_URL"
+```
+
+Eyeball `owner()`, authenticator whitelist, `votingStrategies()`, `proposalValidationStrategy`, and the voting-window fields. `BootstrapPEN` re-checks the `owner()` match on-chain, but this is the last chance for a human to catch a paste error before spending gas.
+
+#### Step 8 — Broadcast Phase 2 (finalize)
+
+With `PHASE2_SPACE_ADDRESS` and `PHASE2_EXEC_STRATEGY_ADDRESS` exported from Step 6:
+
+```sh
+forge script script/BootstrapPEN.s.sol:BootstrapPEN \
+  --rpc-url "$RPC_URL" \
+  --broadcast
+```
+
+This broadcasts, in order, from the same deployer EOA that ran Phase 1:
+
+1. `SeatToken.setSpace(space)` — reverts if `space` is not a contract or its `owner()` doesn't match the Safe address baked into `SeatToken` at Phase 1; on success flips `spaceLocked = true` and clears the `bootstrap` slot to `address(0)` permanently.
+2. Safe transaction `Safe.execTransaction(enableModule(execStrategy), …)`. The deployer, still the Safe's sole owner and threshold=1, signs via the `v=1` "msg.sender == approver" shortcut — no separate `approveHash` call needed.
+3. Safe transaction `Safe.execTransaction(swapOwner(SENTINEL, deployer, execStrategy), …)`. After this the deployer is off the Safe entirely; the exec strategy is both the sole owner (making ECDSA-signed Safe txs impossible, since the exec strategy is a contract) and the sole enabled module (so all Safe operations route through governance).
+
+On success the artifact at `deployments/<chainId>.json` is rewritten with the resolved `space` and `execStrategy` addresses and no `phase2Pending` flag. The system is now fully live.
+
+#### Step 9 — (Optional) State verifier
+
+Run [`script/VerifyPENSystem.s.sol`](script/VerifyPENSystem.s.sol) against the RPC to cross-check the deployed contracts and the UI-created Space against the config values in `.env`:
+
+```sh
+forge script script/VerifyPENSystem.s.sol:VerifyPENSystem --rpc-url "$RPC_URL"
+```
+
+This checks role holders, exec-strategy ownership and space enablement, Space authenticators / voting strategies / proposal validation strategy, and voting-window params against the intended values. For membership-completeness checks that also need historical logs (no stray role holders, no extra enabled spaces, seat-holder census), use the [`script/verify-pen.sh`](script/verify-pen.sh) wrapper.
 
 ### Publishing the Deployment
 
 After successfully deploying Shutter PEN, you can propose the deployment to the community by creating a PR in [shutter-pen-deployment-artifacts](https://github.com/shutter-network/shutter-pen-deployment-artifacts).
 
-After `--broadcast`, Foundry writes per-deployment JSON artifacts (`run-latest.json`, `run-<timestamp>.json`) under `broadcast/DeployPENSystem.s.sol/<chainId>/`.
+#### What gets published
+
+The published bundle is three things — each one has a distinct role for downstream verifiers.
+
+| Path | Written by | What it proves |
+| --- | --- | --- |
+| `deployments/<chainId>.json` | Phase 1 (`_writeDeploymentArtifact`) writes the initial file with `space`/`execStrategy` = `0x0…0` + `phase2Pending: true`. Phase 2 (`_writeFinalizedArtifact`) overwrites it with the real Space + exec-strategy addresses and drops the flag. | The canonical address manifest. This is what tests, `VerifyPENSystem`, and `verify-pen.sh` compare against. |
+| `broadcast/DeployPENSystem.s.sol/<chainId>/run-*.json` | `forge script --broadcast` on Phase 1 | Foundry-format receipts for every Phase 1 tx (Safe singleton + factory + proxy, `SeatToken`, `PrincipalManager`, `BondingTranche`, role grants + renouncements). Enables Etherscan-style contract verification for each address. |
+| `broadcast/BootstrapPEN.s.sol/<chainId>/run-*.json` | `forge script --broadcast` on Phase 2 | Receipts for the three finalize txs: `SeatToken.setSpace`, `Safe.execTransaction(enableModule)`, `Safe.execTransaction(swapOwner)`. |
+
+**Not included** — the two txs that `snapshot.box` submits (the exec-strategy deploy and the Space deploy). Those are the wizard's, not ours. Downstream reviewers can pull them off the explorer using the `execStrategy` / `space` addresses in the manifest.
+
+**Final JSON shape** (this is the schema every consumer relies on — no `phase2Pending` after Phase 2):
+
+```json
+{
+  "safeSingleton":    "0x…",
+  "safeProxyFactory": "0x…",
+  "safe":             "0x…",
+  "seatToken":        "0x…",
+  "principalManager": "0x…",
+  "bondingTranche":   "0x…",
+  "space":            "0x…",
+  "execStrategy":     "0x…"
+}
+```
+
+#### Publish
 
 Fork the artifacts repository, then run the following commands (outside of this repository):
 
 ```sh
 git clone git@github.com:<<YOUR_FORK_OF_SHUTTER_PEN_DEPLOYMENT_ARTIFACTS>>.git
 cd shutter-pen-deployment-artifacts
-mkdir -p deployments
-cp -a <<PATH_TO_PEN_REPOSITORY>>/broadcast/DeployPENSystem.s.sol/. deployments/
-git add deployments
+mkdir -p deployments broadcast/DeployPENSystem.s.sol broadcast/BootstrapPEN.s.sol
+cp -a <<PATH_TO_PEN_REPOSITORY>>/deployments/. deployments/
+cp -a <<PATH_TO_PEN_REPOSITORY>>/broadcast/DeployPENSystem.s.sol/. broadcast/DeployPENSystem.s.sol/
+cp -a <<PATH_TO_PEN_REPOSITORY>>/broadcast/BootstrapPEN.s.sol/. broadcast/BootstrapPEN.s.sol/
+git add deployments broadcast
 git commit -m "Shutter PEN deployment by <<YOUR_NAME>>"
 git push -u origin main
 ```
 
-This copies every chain subfolder (named by chain id) that Foundry produced, so you do not need to know or look up the chain id yourself.
+`cp -a` copies every chain subfolder (named by chain id) that Foundry produced, so you do not need to know or look up the chain id yourself.
 
-This will create a new commit in your fork of the `shutter-pen-deployment-artifacts` repository and push the deployment artifacts to it. Please open a PR with this branch against the `main` branch of the `shutter-pen-deployment-artifacts` repository.
+Open a PR against `main` of the `shutter-pen-deployment-artifacts` repo. Include:
+
+- The chain id you deployed to.
+- The two `snapshot.box` tx hashes (exec-strategy deploy + Space deploy), for provenance.
+- Any config diff from `.env.example` (only the deployer-specific `RPC_URL` / `DEPLOYMENT_SALT` / `PRIVATE_KEY` should differ if you're deploying Shutter PEN as-is).
 
 ## Usage Flows
 

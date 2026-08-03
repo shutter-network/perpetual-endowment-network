@@ -57,11 +57,68 @@ Use this recipe if:
 
 Note:
 - **Why `withdrawFromVault(...)` was added**: when governance sets a new `principalVault`, it first withdraws from the current one using `withdrawFromPrincipalVault(...)`, but some vaults may not allow full-balance withdrawal at that time (e.g. temporary illiquidity, limits, cooldown/strategy constraints). In that case, funds can remain in the older vault. `withdrawFromVault(...)` exists so governance can still withdraw from those older vaults later, even after the active vault pointer has moved, subject to each vault's own constraints.
+- **Drain the old vault promptly.** `PrincipalManager._ensureLiquidity(...)` (invoked by every refund and every `executeFunding` call) can only withdraw from the *current* `principalVault`. Funds still held in a previous vault count toward `totalManagedAssets()` (they satisfy the refund solvency precheck), but they cannot be pulled automatically to satisfy a refund. If liquid reserves and the current vault together cannot cover a refund, the refund will revert even though the system is nominally solvent. Governance must therefore treat any nonzero balance in a previous vault as a live operational task and follow up with `withdrawFromVault(oldVault, amount, address(0))` proposals until the previous vault is empty. See also §"Managing previous principal vaults" below.
 
 ### Notes / operational checklist
 
 - **First-time set vs migration are different templates**: if the vault is unset, do not include withdraw.
 - **Deposit step**: `depositExcessToPrincipalVault()` avoids having to compute a precise deposit amount and leaves the manager’s liquid reserve target intact.
+
+---
+
+## Managing previous principal vaults
+
+Every time `setPrincipalVault(newVault)` rotates to a different vault, the outgoing vault is appended to `PrincipalManager.previousPrincipalVaults[]` (deduplicated). Entries in that array are read by `deployedAssets()` / `totalManagedAssets()` and never removed automatically.
+
+The operator has two reasons to actively curate this array:
+
+1. **Keep the auto-liquidation path clean** — `_ensureLiquidity(...)` only pulls from the current vault; balances left in previous vaults are "solvent on paper, unreachable in practice" (see the note in Recipe B above).
+2. **Excise impaired or defunct integrations** — a vault that reverts on `balanceOf` / `convertToAssets` no longer breaks `totalManagedAssets()` (reverting reads are treated as zero), but it stays in the array forever unless governance removes it. A vault whose shares are permanently lost (hack, insolvency, unrecoverable freeze) is the same situation: its contribution should be excised so accounting reflects reality.
+
+### Recipe C — Remove a drained previous vault (normal cleanup)
+
+Use this recipe after Recipe B when the previous vault has been fully drained via `withdrawFromVault(...)`.
+
+**Pre-flight check (off-chain):**
+
+- Confirm `previousVault.balanceOf(address(PrincipalManager)) == 0`. If it's nonzero, follow Recipe B (drain first) — otherwise proceeding with removal will abandon the remaining shares.
+
+**Proposal transactions (in order):**
+
+1. `PrincipalManager.removePreviousVault(previousVault)`
+
+`removePreviousVault(...)` swap-and-pops the entry from `previousPrincipalVaults[]` and clears the tracking mapping. It reverts on:
+
+- `PreviousVaultNotTracked(vault)` — the address is not in the array (never was, or was already removed).
+- `PreviousVaultIsCurrent(vault)` — the address is currently `principalVault()`. Rotate away with Recipe B first.
+
+### Recipe D — Write off an impaired previous vault (loss / freeze)
+
+Use this recipe only when the previous vault's shares are unrecoverable — the integration is hacked, the vault is permanently paused, upgraded to reverting code, or governance has otherwise decided to abandon those shares.
+
+**`removePreviousVault(...)` does not check the remaining share balance.** Whatever balance the contract still holds at the moment of removal is *written off*: the contract keeps the shares (they cannot be reintroduced except by rotating that vault back in via `setPrincipalVault`) but they no longer contribute to `totalManagedAssets()`.
+
+**Proposal transactions (in order):**
+
+1. `PrincipalManager.removePreviousVault(impairedVault)`
+
+The emitted `PreviousPrincipalVaultRemoved(vault, abandonedShares)` event records the last observed share balance (best-effort — a reverting `balanceOf` reports zero). This is the on-chain audit trail for the write-off; make sure the associated governance proposal justifies the loss.
+
+### Recovery limitation after a write-off
+
+`BondingTranche.refundPrice` is `immutable`. The refund solvency precheck is:
+
+```
+totalSupply(SeatToken) * refundPrice <= totalManagedAssets()
+```
+
+If a write-off (Recipe D) drops `totalManagedAssets()` below `totalSupply * refundPrice`, **all refunds are blocked** until one of:
+
+- Enough fresh assets are injected into `PrincipalManager` (yield harvested, treasury top-up, insurance) to restore the ratio.
+- `SeatToken.totalSupply()` shrinks (holders burning seats via reclaim of inactive holders, or through a subsequent successful refund cycle once solvency is restored).
+- The PEN instance is migrated / redeployed with different parameters (see `docs/pen-migration.md`).
+
+There is no on-chain "reduce the per-seat refund price" primitive. Operators considering Recipe D on a material portion of assets should have the recovery path decided beforehand.
 
 ---
 

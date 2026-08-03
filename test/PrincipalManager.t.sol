@@ -177,4 +177,182 @@ contract PrincipalManagerTest is Test {
         assertEq(address(principalManager.previousPrincipalVaults(0)), address(principalVault));
         assertEq(address(principalManager.previousPrincipalVaults(1)), address(secondPrincipalVault));
     }
+
+    function test_TotalManagedAssetsSurvivesRevertingHistoricalVault() public {
+        RevertingVault brokenVault = new RevertingVault(address(usdc));
+        ERC4626Mock newVault = new ERC4626Mock(address(usdc));
+
+        usdc.mint(address(principalManager), 40e6);
+        vm.prank(bonding);
+        principalManager.recordPurchase(40e6);
+
+        vm.prank(admin);
+        principalManager.setPrincipalVault(IERC4626(address(brokenVault)));
+
+        // "Deposit" via a direct mint of vault shares so balanceOf returns non-zero before we break it.
+        brokenVault.mintShares(address(principalManager), 30e6);
+
+        vm.prank(admin);
+        principalManager.setPrincipalVault(newVault);
+
+        assertEq(principalManager.previousPrincipalVaultCount(), 1);
+        assertEq(principalManager.deployedAssets(), 30e6);
+
+        brokenVault.setRevertOnBalanceOf(true);
+        assertEq(principalManager.deployedAssets(), 0);
+        assertEq(principalManager.totalManagedAssets(), principalManager.liquidAssets());
+
+        brokenVault.setRevertOnBalanceOf(false);
+        brokenVault.setRevertOnConvertToAssets(true);
+        assertEq(principalManager.deployedAssets(), 0);
+    }
+
+    function test_RefundFromLiquidReservesUnaffectedByBrokenHistoricalVault() public {
+        RevertingVault brokenVault = new RevertingVault(address(usdc));
+        ERC4626Mock newVault = new ERC4626Mock(address(usdc));
+
+        usdc.mint(address(principalManager), 100e6);
+        vm.prank(bonding);
+        principalManager.recordPurchase(100e6);
+
+        vm.prank(admin);
+        principalManager.setPrincipalVault(IERC4626(address(brokenVault)));
+
+        brokenVault.mintShares(address(principalManager), 20e6);
+
+        vm.prank(admin);
+        principalManager.setPrincipalVault(newVault);
+
+        // Break the historical vault; refunds must still work from liquid reserves.
+        brokenVault.setRevertOnBalanceOf(true);
+
+        vm.prank(bonding);
+        principalManager.payRefund(refundReceiver, 30e6);
+
+        assertEq(usdc.balanceOf(refundReceiver), 30e6);
+    }
+
+    function test_RemovePreviousVaultDropsEntryAndUpdatesMapping() public {
+        ERC4626Mock secondVault = new ERC4626Mock(address(usdc));
+        ERC4626Mock thirdVault = new ERC4626Mock(address(usdc));
+
+        vm.prank(admin);
+        principalManager.setPrincipalVault(principalVault);
+        vm.prank(admin);
+        principalManager.setPrincipalVault(secondVault);
+        vm.prank(admin);
+        principalManager.setPrincipalVault(thirdVault);
+
+        assertEq(principalManager.previousPrincipalVaultCount(), 2);
+
+        vm.prank(admin);
+        principalManager.removePreviousVault(principalVault);
+
+        assertEq(principalManager.previousPrincipalVaultCount(), 1);
+        // Swap-and-pop: secondVault should now be at index 0.
+        assertEq(address(principalManager.previousPrincipalVaults(0)), address(secondVault));
+
+        // Removed vault can be re-added later by cycling through it again.
+        vm.prank(admin);
+        principalManager.setPrincipalVault(principalVault);
+        assertEq(principalManager.previousPrincipalVaultCount(), 2);
+    }
+
+    function test_RemovePreviousVaultWritesOffAbandonedShares() public {
+        RevertingVault brokenVault = new RevertingVault(address(usdc));
+        ERC4626Mock newVault = new ERC4626Mock(address(usdc));
+
+        vm.prank(admin);
+        principalManager.setPrincipalVault(IERC4626(address(brokenVault)));
+
+        brokenVault.mintShares(address(principalManager), 17e6);
+
+        vm.prank(admin);
+        principalManager.setPrincipalVault(newVault);
+
+        assertEq(principalManager.deployedAssets(), 17e6);
+
+        vm.prank(admin);
+        principalManager.removePreviousVault(IERC4626(address(brokenVault)));
+
+        // After removal, the abandoned shares no longer contribute to deployedAssets.
+        assertEq(principalManager.deployedAssets(), 0);
+        assertEq(principalManager.previousPrincipalVaultCount(), 0);
+    }
+
+    function test_RemovePreviousVaultRevertsWhenNotTracked() public {
+        ERC4626Mock strangerVault = new ERC4626Mock(address(usdc));
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(PrincipalManager.PreviousVaultNotTracked.selector, address(strangerVault))
+        );
+        principalManager.removePreviousVault(strangerVault);
+    }
+
+    function test_RemovePreviousVaultRevertsWhenVaultIsCurrent() public {
+        ERC4626Mock secondVault = new ERC4626Mock(address(usdc));
+
+        vm.prank(admin);
+        principalManager.setPrincipalVault(principalVault);
+        vm.prank(admin);
+        principalManager.setPrincipalVault(secondVault);
+        vm.prank(admin);
+        principalManager.setPrincipalVault(principalVault); // principalVault is now current AND tracked as previous
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(PrincipalManager.PreviousVaultIsCurrent.selector, address(principalVault))
+        );
+        principalManager.removePreviousVault(principalVault);
+    }
+
+    function test_RemovePreviousVaultOnlyAdmin() public {
+        ERC4626Mock secondVault = new ERC4626Mock(address(usdc));
+
+        vm.prank(admin);
+        principalManager.setPrincipalVault(principalVault);
+        vm.prank(admin);
+        principalManager.setPrincipalVault(secondVault);
+
+        address rando = makeAddr("rando");
+        vm.prank(rando);
+        vm.expectRevert();
+        principalManager.removePreviousVault(principalVault);
+    }
+}
+
+/// @dev Minimal ERC4626-shaped mock that can be flipped to revert on the two reads
+///      `_deployedAssetsFromPreviousVaults` performs. Only implements what the tests need.
+contract RevertingVault {
+    address public asset;
+    bool public revertOnBalanceOf;
+    bool public revertOnConvertToAssets;
+    mapping(address => uint256) internal _shares;
+
+    constructor(address asset_) {
+        asset = asset_;
+    }
+
+    function setRevertOnBalanceOf(bool value) external {
+        revertOnBalanceOf = value;
+    }
+
+    function setRevertOnConvertToAssets(bool value) external {
+        revertOnConvertToAssets = value;
+    }
+
+    function mintShares(address to, uint256 amount) external {
+        _shares[to] += amount;
+    }
+
+    function balanceOf(address account) external view returns (uint256) {
+        if (revertOnBalanceOf) revert("balanceOf broken");
+        return _shares[account];
+    }
+
+    function convertToAssets(uint256 shares) external view returns (uint256) {
+        if (revertOnConvertToAssets) revert("convertToAssets broken");
+        return shares;
+    }
 }

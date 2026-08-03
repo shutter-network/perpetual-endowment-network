@@ -8,6 +8,9 @@ broadcast/
 # Transient verifier output (written by script/verify-pen.sh)
 deployments/.pen-verify-derived.json
 
+# ENSv1 commit/reveal secrets (written by script/register-ens-v1-sepolia.sh)
+.ens-v1-*.state*
+
 # Dependencies
 lib/**/node_modules/
 

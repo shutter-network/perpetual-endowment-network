@@ -11,17 +11,14 @@ import {console2} from "forge-std/console2.sol";
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
 import {SeatToken} from "../src/SeatToken.sol";
-import {PENSafeBootstrap} from "../src/deployment/PENSafeBootstrap.sol";
 
 import {IProxyFactory} from "@snapshot-x/interfaces/IProxyFactory.sol";
-import {AvatarExecutionStrategy} from "@snapshot-x/execution-strategies/AvatarExecutionStrategy.sol";
-import {TimelockExecutionStrategy} from "@snapshot-x/execution-strategies/timelocks/TimelockExecutionStrategy.sol";
 
 import {Safe} from "@gnosis.pm/safe-contracts/contracts/Safe.sol";
 import {SafeProxy} from "@gnosis.pm/safe-contracts/contracts/proxies/SafeProxy.sol";
 import {SafeProxyFactory} from "@gnosis.pm/safe-contracts/contracts/proxies/SafeProxyFactory.sol";
 
-/// @dev Minimal interface for SpaceManager on execution strategies.
+/// @dev Minimal interface for SpaceManager on execution strategies (used by tests + VerifyPENSystem).
 interface ISpaceManager {
     function enableSpace(address space) external;
     function isSpaceEnabled(address space) external view returns (uint256);
@@ -49,14 +46,12 @@ abstract contract PENDeploymentHelper {
         uint256[] tranchePrices;
     }
 
-    /// @dev The Space-parameter fields below (voting durations, threshold, canonical strategy /
-    ///      authenticator addresses) are no longer consumed by Phase 1 — the Space is created
-    ///      by the operator via `snapshot.box` in Phase 2. They remain in the config so
-    ///      `VerifyPENSystem` can cross-check the deployed Space against the intended values.
+    /// @dev These fields are not consumed by Phase 1 — the Space and its execution strategy
+    ///      are deployed by the operator via `snapshot.box` in Phase 2. They remain in the
+    ///      config so `VerifyPENSystem` can cross-check the deployed Space (and the UI-deployed
+    ///      exec strategy) against the intended values.
     struct GovernanceConfig {
         address sxProxyFactory;
-        address sxAvatarImpl;
-        address sxTimelockImpl;
         address sxPropositionPowerValidation;
         address sxOzVotesStrategy;
         address sxEthTxAuthenticator;
@@ -65,7 +60,7 @@ abstract contract PENDeploymentHelper {
         uint32 maxVotingDuration;
         uint256 avatarQuorum;
         uint256 proposerSeatThreshold;
-        bool timelockEnabled; // Timelock (optional — set timelockEnabled = false to use AvatarExecutionStrategy directly)
+        bool timelockEnabled;
         uint32 timelockDelay;
     }
 
@@ -74,19 +69,16 @@ abstract contract PENDeploymentHelper {
         GovernanceConfig governance;
     }
 
-    /// @dev Phase 1 outputs. The Space is deployed out-of-band via `snapshot.box` and bound
-    ///      to SeatToken by `script/BootstrapPEN.s.sol` (Phase 2), which appends the resulting
-    ///      `space` address to the on-disk artifact.
+    /// @dev Phase 1 outputs. The Safe is deployed with the deployer EOA as its sole owner
+    ///      (threshold = 1, no module enabled); Phase 2 (`BootstrapPEN.s.sol`) enables the
+    ///      UI-deployed exec strategy as a module and swaps it in as the Safe's owner.
     struct DeploymentAddresses {
         address safeSingleton;
         address safeProxyFactory;
-        address safeBootstrap;
         address safe;
         address seatToken;
         address principalManager;
         address bondingTranche;
-        address executionStrategy; // AvatarExecutionStrategy proxy
-        address timelockExecutionStrategy; // TimelockExecutionStrategy proxy; 0x0 if disabled
     }
 
     // ── Address prediction ─────────────────────────────────────────────────────────────
@@ -95,35 +87,26 @@ abstract contract PENDeploymentHelper {
         address deployer_,
         uint256 startingNonce_,
         bytes32 salt_,
-        DeploymentConfig memory config_
-    ) public view returns (DeploymentAddresses memory predicted_) {
+        DeploymentConfig memory /* config_ */
+    )
+        public
+        pure
+        returns (DeploymentAddresses memory predicted_)
+    {
         uint256 nextNonce = startingNonce_;
 
         predicted_.safeSingleton = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.safeProxyFactory = _computeCreateAddress(deployer_, nextNonce++);
-        predicted_.safeBootstrap = _computeCreateAddress(deployer_, nextNonce++);
-
-        // Each ProxyFactory.deployProxy call is a deployer tx (advances nonce), but the
-        // proxy address is CREATE2-based (salt = keccak256(deployer, saltNonce)).
-        nextNonce++; // avatar proxy tx
-        predicted_.executionStrategy =
-            _computeProxyAddress(config_.governance.sxProxyFactory, config_.governance.sxAvatarImpl, deployer_, 0);
-
-        if (config_.governance.timelockEnabled) {
-            nextNonce++; // timelock proxy tx
-            predicted_.timelockExecutionStrategy = _computeProxyAddress(
-                config_.governance.sxProxyFactory, config_.governance.sxTimelockImpl, deployer_, 1
-            );
-        }
 
         nextNonce++; // safeProxyFactory.createProxyWithNonce tx (Safe uses CREATE2 internally)
-        predicted_.safe = _predictSafeAddress(predicted_, salt_);
+        predicted_.safe = _predictSafeAddress(predicted_, deployer_, salt_);
 
         predicted_.seatToken = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.principalManager = _computeCreateAddress(deployer_, nextNonce++);
         predicted_.bondingTranche = _computeCreateAddress(deployer_, nextNonce++);
-        // No Space nonce-slot: the Space is deployed via `snapshot.box` in Phase 2 with a
-        // salt the UI controls, so it cannot be pre-derived from the deployer's nonce here.
+        // No Space nonce-slot: the Space (and its exec strategy) are deployed via
+        // `snapshot.box` in Phase 2 with a salt the UI controls, so they cannot be
+        // pre-derived from the deployer's nonce here.
     }
 
     // ── Deployment ─────────────────────────────────────────────────────────────────────
@@ -140,72 +123,23 @@ abstract contract PENDeploymentHelper {
         deployed_.safeProxyFactory = address(new SafeProxyFactory());
         _assertDeployedAddress("SAFE_PROXY_FACTORY", expected_.safeProxyFactory, deployed_.safeProxyFactory);
 
-        deployed_.safeBootstrap = address(new PENSafeBootstrap());
-        _assertDeployedAddress("SAFE_BOOTSTRAP", expected_.safeBootstrap, deployed_.safeBootstrap);
-
-        // Steps 4–5: execution strategy proxies (avatar + optional timelock).
-        // Voting power uses the canonical stock `OZVotesVotingStrategy` at
-        // `config_.governance.sxOzVotesStrategy` — no PEN-specific voting strategy is deployed.
-        (deployed_.executionStrategy, deployed_.timelockExecutionStrategy) =
-            _deployGovernanceContracts(expected_, config_, bootstrapAuthority_);
-
-        // Step 7: Safe proxy (owners = [module], module enabled via delegatecall to PENSafeBootstrap)
+        // Safe proxy: owner = [deployer], threshold = 1, no module. Phase 2 enables the
+        // UI-deployed exec strategy as a module and swaps it in as the sole owner.
         deployed_.safe = address(
             SafeProxyFactory(deployed_.safeProxyFactory)
-                .createProxyWithNonce(deployed_.safeSingleton, _safeInitializer(expected_), uint256(salt_))
+                .createProxyWithNonce(deployed_.safeSingleton, _safeInitializer(bootstrapAuthority_), uint256(salt_))
         );
         _assertDeployedAddress("SAFE", expected_.safe, deployed_.safe);
 
-        // Steps 8–10: Core contracts
         (deployed_.seatToken, deployed_.principalManager, deployed_.bondingTranche) =
             _deployCoreContracts(expected_, config_, bootstrapAuthority_);
 
-        // Step 11: Finalise access on SeatToken / PrincipalManager / BondingTranche. Space
-        // binding (`SeatToken.setSpace`) and exec-strategy `enableSpace` + ownership transfer
-        // happen in Phase 2 (`script/BootstrapPEN.s.sol`), because the Space does not exist yet.
+        // Finalise access on SeatToken / PrincipalManager / BondingTranche. Space binding
+        // (`SeatToken.setSpace`) and Safe module enablement / owner swap happen in Phase 2
+        // (`script/BootstrapPEN.s.sol`), because the Space and exec strategy do not exist yet.
         _finalizeAccess(deployed_, bootstrapAuthority_);
 
         return expected_;
-    }
-
-    function _deployGovernanceContracts(
-        DeploymentAddresses memory expected_,
-        DeploymentConfig memory config_,
-        address deployer_
-    ) internal returns (address executionStrategy_, address timelockExecutionStrategy_) {
-        IProxyFactory proxyFactory = IProxyFactory(config_.governance.sxProxyFactory);
-
-        // AvatarExecutionStrategy: owner = deployer (transferred to Safe in _initializeGovernance),
-        // target = Safe, no spaces yet (added via enableSpace after Space is deployed).
-        bytes memory avatarInitParams =
-            abi.encode(deployer_, expected_.safe, new address[](0), config_.governance.avatarQuorum);
-        proxyFactory.deployProxy(
-            config_.governance.sxAvatarImpl, abi.encodeCall(AvatarExecutionStrategy.setUp, (avatarInitParams)), 0
-        );
-        executionStrategy_ =
-            _computeProxyAddress(config_.governance.sxProxyFactory, config_.governance.sxAvatarImpl, deployer_, 0);
-        _assertDeployedAddress("EXECUTION_STRATEGY", expected_.executionStrategy, executionStrategy_);
-
-        if (config_.governance.timelockEnabled) {
-            bytes memory timelockInitParams = abi.encode(
-                deployer_,
-                address(0), // vetoGuardian — deferred per PLAN.md §0
-                new address[](0),
-                config_.governance.timelockDelay,
-                config_.governance.avatarQuorum
-            );
-            proxyFactory.deployProxy(
-                config_.governance.sxTimelockImpl,
-                abi.encodeCall(TimelockExecutionStrategy.setUp, (timelockInitParams)),
-                1
-            );
-            timelockExecutionStrategy_ = _computeProxyAddress(
-                config_.governance.sxProxyFactory, config_.governance.sxTimelockImpl, deployer_, 1
-            );
-            _assertDeployedAddress(
-                "TIMELOCK_EXEC_STRATEGY", expected_.timelockExecutionStrategy, timelockExecutionStrategy_
-            );
-        }
     }
 
     function _deployCoreContracts(
@@ -282,26 +216,23 @@ abstract contract PENDeploymentHelper {
 
     // ── Safe initializer ───────────────────────────────────────────────────────────────
 
-    function _safeInitializer(DeploymentAddresses memory predicted_) internal pure returns (bytes memory) {
-        // The Safe's single owner is the execution strategy (or timelock if enabled).
-        // PENSafeBootstrap.setUp enables it as a module via delegatecall during Safe.setup.
-        address moduleToEnable = predicted_.timelockExecutionStrategy != address(0)
-            ? predicted_.timelockExecutionStrategy
-            : predicted_.executionStrategy;
-
+    /// @dev Safe is set up with a single owner (the deployer EOA), threshold = 1, and no
+    ///      module. Phase 2 (`BootstrapPEN.s.sol`) submits Safe transactions signed by the
+    ///      deployer to (a) enable the UI-deployed exec strategy as a module and (b) swap
+    ///      the sole owner from the deployer to the exec strategy.
+    function _safeInitializer(address deployer_) internal pure returns (bytes memory) {
         address[] memory owners = new address[](1);
-        owners[0] = moduleToEnable;
+        owners[0] = deployer_;
 
-        bytes memory bootstrapData = abi.encodeCall(PENSafeBootstrap.setUp, (moduleToEnable));
-
-        return abi.encodeCall(
-            Safe.setup,
-            (owners, 1, predicted_.safeBootstrap, bootstrapData, address(0), address(0), 0, payable(address(0)))
-        );
+        return abi.encodeCall(Safe.setup, (owners, 1, address(0), "", address(0), address(0), 0, payable(address(0))));
     }
 
-    function _predictSafeAddress(DeploymentAddresses memory predicted_, bytes32 salt_) internal pure returns (address) {
-        bytes memory initializer = _safeInitializer(predicted_);
+    function _predictSafeAddress(DeploymentAddresses memory predicted_, address deployer_, bytes32 salt_)
+        internal
+        pure
+        returns (address)
+    {
+        bytes memory initializer = _safeInitializer(deployer_);
         bytes32 proxySalt = keccak256(abi.encodePacked(keccak256(initializer), uint256(salt_)));
         bytes32 proxyInitCodeHash =
             keccak256(abi.encodePacked(type(SafeProxy).creationCode, uint256(uint160(predicted_.safeSingleton))));
@@ -318,6 +249,8 @@ abstract contract PENDeploymentHelper {
         return address(uint160(uint256(keccak256(RLP.encode(encoded)))));
     }
 
+    /// @dev Retained for test harnesses that deploy sx-evm exec-strategy proxies inline via
+    ///      the SX ProxyFactory. Not used by the production Phase 1 script anymore.
     function _computeProxyAddress(
         address sxProxyFactory_,
         address implementation_,
@@ -361,8 +294,6 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
         bool timelockEnabled_ = _envBoolOrFalse("TIMELOCK_ENABLED");
         config.governance = GovernanceConfig({
             sxProxyFactory: vm.envAddress("SX_PROXY_FACTORY"),
-            sxAvatarImpl: vm.envAddress("SX_AVATAR_IMPL"),
-            sxTimelockImpl: vm.envAddress("SX_TIMELOCK_IMPL"),
             sxPropositionPowerValidation: vm.envAddress("SX_PROPOSITION_POWER_VALIDATION"),
             sxOzVotesStrategy: vm.envAddress("SX_OZ_VOTES_STRATEGY"),
             sxEthTxAuthenticator: vm.envAddress("SX_ETH_TX_AUTHENTICATOR"),
@@ -421,18 +352,16 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
     function _logAddresses(DeploymentAddresses memory d_) internal pure {
         console2.log("SafeSingleton:             ", d_.safeSingleton);
         console2.log("SafeProxyFactory:          ", d_.safeProxyFactory);
-        console2.log("PENSafeBootstrap:          ", d_.safeBootstrap);
         console2.log("Safe:                      ", d_.safe);
         console2.log("SeatToken:                 ", d_.seatToken);
         console2.log("PrincipalManager:          ", d_.principalManager);
         console2.log("BondingTranche:            ", d_.bondingTranche);
-        console2.log("ExecutionStrategy:         ", d_.executionStrategy);
-        console2.log("TimelockExecutionStrategy: ", d_.timelockExecutionStrategy);
     }
 
-    /// @dev Writes the Phase 1 deployment artifact. `space` is emitted as the zero address
-    ///      and `phase2Pending: true` marks the artifact as awaiting `script/BootstrapPEN.s.sol`.
-    ///      `BootstrapPEN` rewrites this file with the real Space address and removes the flag.
+    /// @dev Writes the Phase 1 deployment artifact. `space` and `execStrategy` are emitted as
+    ///      the zero address and `phase2Pending: true` marks the artifact as awaiting
+    ///      `script/BootstrapPEN.s.sol`. `BootstrapPEN` rewrites this file with the real Space
+    ///      + exec-strategy addresses and removes the flag.
     function _writeDeploymentArtifact(DeploymentAddresses memory d_) internal {
         string memory json = string.concat(
             "{\n",
@@ -441,9 +370,6 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
             '",\n',
             '  "safeProxyFactory": "',
             vm.toString(d_.safeProxyFactory),
-            '",\n',
-            '  "safeBootstrap": "',
-            vm.toString(d_.safeBootstrap),
             '",\n',
             '  "safe": "',
             vm.toString(d_.safe),
@@ -460,11 +386,8 @@ abstract contract PENDeploymentScriptBase is Script, PENDeploymentHelper {
             '  "space": "',
             vm.toString(address(0)),
             '",\n',
-            '  "executionStrategy": "',
-            vm.toString(d_.executionStrategy),
-            '",\n',
-            '  "timelockExecutionStrategy": "',
-            vm.toString(d_.timelockExecutionStrategy),
+            '  "execStrategy": "',
+            vm.toString(address(0)),
             '",\n',
             '  "phase2Pending": true\n',
             "}"

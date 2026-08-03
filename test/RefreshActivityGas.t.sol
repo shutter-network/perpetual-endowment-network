@@ -16,7 +16,6 @@ import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {SeatToken} from "../src/SeatToken.sol";
 import {BondingTranche} from "../src/BondingTranche.sol";
 import {PrincipalManager} from "../src/PrincipalManager.sol";
-import {PENSafeBootstrap} from "../src/deployment/PENSafeBootstrap.sol";
 
 import {PENBootstrapHelper} from "../script/BootstrapPEN.s.sol";
 
@@ -55,6 +54,7 @@ contract RefreshActivityGasTest is Test, PENBootstrapHelper {
 
     DeploymentAddresses internal sys;
     address internal space;
+    address internal execStrategy;
     address internal ozVotesStrategy;
     address internal ethTxAuthenticator;
     address internal proposer;
@@ -161,10 +161,11 @@ contract RefreshActivityGasTest is Test, PENBootstrapHelper {
     function _runBatch(uint256 n) internal {
         address[] memory voters = _seedNVoters(n);
         uint256[] memory ids = new uint256[](n);
-        for (uint256 i; // same proposal per entry — the per-entry cost i < n; ++i) {
+        // Same proposal per entry. The per-entry cost still includes a `proposals(id)`
+        // SLOAD, so gas reflects the real per-entry price.
+        for (uint256 i; i < n; ++i) {
             ids[i] = proposalId;
         }
-        // still includes a `proposals(id)` SLOAD, so gas reflects the real per-entry price.
 
         SeatToken st = SeatToken(sys.seatToken);
         uint256 gasBefore = gasleft();
@@ -210,31 +211,20 @@ contract RefreshActivityGasTest is Test, PENBootstrapHelper {
     function _deployTwoPhaseSystem() internal {
         ProxyFactory proxyFactory = new ProxyFactory();
         Space spaceImpl = new Space();
-        AvatarExecutionStrategy avatarImpl =
-            new AvatarExecutionStrategy(address(this), address(this), new address[](0), 1);
         StubProposalValidation propValidation = new StubProposalValidation();
         paymentToken = new MockUSDC();
 
         sys.safeSingleton = address(new Safe());
         sys.safeProxyFactory = address(new SafeProxyFactory());
-        sys.safeBootstrap = address(new PENSafeBootstrap());
         ozVotesStrategy = address(new OZVotesVotingStrategy());
         ethTxAuthenticator = address(new EthTxAuthenticator());
 
-        sys.executionStrategy = _computeProxyAddress(address(proxyFactory), address(avatarImpl), address(this), 0);
-        sys.safe = _predictSafeAddress(sys, bytes32(0));
-
-        proxyFactory.deployProxy(
-            address(avatarImpl),
-            abi.encodeCall(
-                AvatarExecutionStrategy.setUp, (abi.encode(address(this), sys.safe, new address[](0), uint256(QUORUM)))
-            ),
-            0
-        );
-
+        // Phase 1 Safe: owner = test contract, threshold = 1, no module. Phase 2
+        // (`_bootstrapPEN`) enables the exec strategy as a module and swaps the sole owner.
+        sys.safe = _predictSafeAddress(sys, address(this), bytes32(0));
         sys.safe = address(
             SafeProxyFactory(sys.safeProxyFactory)
-                .createProxyWithNonce(sys.safeSingleton, _safeInitializer(sys), uint256(0))
+                .createProxyWithNonce(sys.safeSingleton, _safeInitializer(address(this)), uint256(0))
         );
 
         sys.seatToken = address(
@@ -299,10 +289,25 @@ contract RefreshActivityGasTest is Test, PENBootstrapHelper {
             votingStrategyMetadataURI: ""
         });
         InitializeCalldata memory init = SpaceInit.buildInitializeCalldata(params);
-        ProxyFactory(pf).deployProxy(si, SpaceInit.encodeInitializeCall(init), 1);
-        space = _computeProxyAddress(pf, si, address(this), 1);
+        ProxyFactory(pf).deployProxy(si, SpaceInit.encodeInitializeCall(init), 0);
+        space = _computeProxyAddress(pf, si, address(this), 0);
 
-        _bootstrapPEN(sys, space);
+        // Deploy an AvatarExecutionStrategy with spaces=[space], controller=safe (matches
+        // the wizard's Executions step in production).
+        address[] memory spaces = new address[](1);
+        spaces[0] = space;
+        AvatarExecutionStrategy impl = new AvatarExecutionStrategy(address(this), address(this), new address[](0), 1);
+        ProxyFactory(pf)
+            .deployProxy(
+                address(impl),
+                abi.encodeCall(
+                    AvatarExecutionStrategy.setUp, (abi.encode(sys.safe, sys.safe, spaces, uint256(QUORUM)))
+                ),
+                1
+            );
+        execStrategy = _computeProxyAddress(pf, address(impl), address(this), 1);
+
+        _bootstrapPEN(sys, space, execStrategy, address(this));
     }
 
     // ── Propose helper (single real proposal, no votes needed for the benchmark) ─
@@ -318,7 +323,7 @@ contract RefreshActivityGasTest is Test, PENBootstrapHelper {
         txs[0] = MetaTransaction({to: address(0xdead), value: 0, data: "", operation: Enum.Operation.Call, salt: 0});
         bytes memory payload = abi.encode(txs);
         bytes memory data = abi.encode(
-            author, "", Strategy({addr: sys.executionStrategy, params: payload}), abi.encode(_defaultUserStrategies())
+            author, "", Strategy({addr: execStrategy, params: payload}), abi.encode(_defaultUserStrategies())
         );
         vm.prank(author);
         EthTxAuthenticator(ethTxAuthenticator).authenticate(space, PROPOSE_SELECTOR, data);

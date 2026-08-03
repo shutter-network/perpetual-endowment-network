@@ -19,7 +19,6 @@ import {BondingTranche} from "../../src/BondingTranche.sol";
 import {PrincipalManager} from "../../src/PrincipalManager.sol";
 import {EthTxAuthenticator} from "@snapshot-x/authenticators/EthTxAuthenticator.sol";
 import {OZVotesVotingStrategy} from "@snapshot-x/voting-strategies/OZVotesVotingStrategy.sol";
-import {PENSafeBootstrap} from "../../src/deployment/PENSafeBootstrap.sol";
 
 import {Choice, IndexedStrategy, Strategy, MetaTransaction, InitializeCalldata} from "@snapshot-x/types.sol";
 import {SpaceInit} from "../helpers/SpaceInit.sol";
@@ -59,6 +58,7 @@ contract EndToEndProposalTest is Test, PENBootstrapHelper {
 
     DeploymentAddresses internal sys;
     address internal space; // Phase 2 output — the Space address, set after _bootstrapPEN.
+    address internal execStrategy; // Phase 2 output — the UI-deployed exec strategy (Avatar or Timelock).
     MockUSDC internal paymentToken;
     address internal ozVotesStrategy;
     address internal ethTxAuthenticator;
@@ -123,9 +123,10 @@ contract EndToEndProposalTest is Test, PENBootstrapHelper {
 
     // ── Helpers: Space interaction ────────────────────────────────────────────
 
-    // Use timelockExecutionStrategy when deployed; otherwise AvatarExecutionStrategy.
+    // The UI-deployed exec strategy: either `AvatarExecutionStrategy` (base test) or
+    // `TimelockExecutionStrategy` (TimelockedExecutionTest). Set by `_deploySpaceAndFinalize`.
     function _activeExecStrategy() internal view returns (address) {
-        return sys.timelockExecutionStrategy != address(0) ? sys.timelockExecutionStrategy : sys.executionStrategy;
+        return execStrategy;
     }
 
     function _defaultUserStrategies() internal pure returns (IndexedStrategy[] memory strats) {
@@ -159,29 +160,23 @@ contract EndToEndProposalTest is Test, PENBootstrapHelper {
     // Deploys the full PEN system without using previewDeployment + nonce assertions.
     // previewDeployment counts deployer nonce increments assuming broadcast (one tx per call).
     // In a Foundry test, CALLs do not increment the deployer's nonce — only CREATE ops do.
-    // This helper deploys in deployment-order and wires the same roles as _deploySystem.
-    //
-    // Split into _deployInfra + _deploySpaceAndFinalize to keep each function's local
-    // variable count under the 16-slot EVM stack limit (optimizer enabled).
+    // This helper mirrors the production Phase 1 + Phase 2 flow: Phase 1 deploys the Safe
+    // (owner = test contract, threshold = 1, no module) + core; Phase 2 deploys Space + exec
+    // strategy via ProxyFactory (the in-test stand-in for snapshot.box) and then routes
+    // through `_bootstrapPEN` (setSpace + enableModule + swapOwner).
     function _deployTestSystem(bool timelockEnabled, uint32 timelockDelay)
         internal
         returns (DeploymentAddresses memory d)
     {
-        (address pf, address si, address pv, uint256 ssn) = _deployInfra(timelockEnabled, timelockDelay, d);
-        _deploySpaceAndFinalize(timelockEnabled, d, pf, si, pv, ssn);
+        (address pf, address si, address pv) = _deployInfra(d);
+        _deploySpaceAndFinalize(timelockEnabled, timelockDelay, d, pf, si, pv);
     }
 
-    // Deploys all contracts except the Space proxy; modifies d in place (memory ref).
-    // Returns the four addresses needed by _deploySpaceAndFinalize.
-    function _deployInfra(bool timelockEnabled, uint32 timelockDelay, DeploymentAddresses memory d)
-        private
-        returns (address pf, address si, address pv, uint256 ssn)
-    {
+    // Deploys all contracts except the Space + exec strategy; modifies d in place (memory ref).
+    // Returns the three addresses needed by _deploySpaceAndFinalize.
+    function _deployInfra(DeploymentAddresses memory d) private returns (address pf, address si, address pv) {
         ProxyFactory proxyFactory = new ProxyFactory();
         Space spaceImpl = new Space();
-        AvatarExecutionStrategy avatarImpl =
-            new AvatarExecutionStrategy(address(this), address(this), new address[](0), 1);
-        TimelockExecutionStrategy timelockImpl = new TimelockExecutionStrategy();
         // StubProposalValidation avoids PropositionPowerProposalValidationStrategy which
         // pulls PropositionPower → SXUtils → bare "src/types.sol" causing source-unit
         // ID conflicts (see StubProposalValidation.sol for details).
@@ -190,7 +185,6 @@ contract EndToEndProposalTest is Test, PENBootstrapHelper {
 
         d.safeSingleton = address(new Safe());
         d.safeProxyFactory = address(new SafeProxyFactory());
-        d.safeBootstrap = address(new PENSafeBootstrap());
         // Stock voting strategy — same one the production deploy script wires through
         // `SX_OZ_VOTES_STRATEGY`. Reads voting power from SeatToken.getPastVotes.
         ozVotesStrategy = address(new OZVotesVotingStrategy());
@@ -199,31 +193,12 @@ contract EndToEndProposalTest is Test, PENBootstrapHelper {
         // authenticator is deployed.
         ethTxAuthenticator = address(new EthTxAuthenticator());
 
-        d.executionStrategy = _computeProxyAddress(address(proxyFactory), address(avatarImpl), address(this), 0);
-
-        ssn = 1;
-        if (timelockEnabled) {
-            d.timelockExecutionStrategy =
-                _computeProxyAddress(address(proxyFactory), address(timelockImpl), address(this), 1);
-            ssn = 2;
-        }
-
-        d.safe = _predictSafeAddress(d, bytes32(0));
-
-        proxyFactory.deployProxy(
-            address(avatarImpl),
-            abi.encodeCall(
-                AvatarExecutionStrategy.setUp, (abi.encode(address(this), d.safe, new address[](0), uint256(QUORUM)))
-            ),
-            0
-        );
-
-        if (timelockEnabled) {
-            _deployTimelockProxy(proxyFactory, address(timelockImpl), timelockDelay);
-        }
-
+        // Phase 1 Safe: owner = test contract (stand-in for the deployer EOA), threshold = 1,
+        // no module. Phase 2 enables the exec strategy as a module and swaps the sole owner.
+        d.safe = _predictSafeAddress(d, address(this), bytes32(0));
         d.safe = address(
-            SafeProxyFactory(d.safeProxyFactory).createProxyWithNonce(d.safeSingleton, _safeInitializer(d), uint256(0))
+            SafeProxyFactory(d.safeProxyFactory)
+                .createProxyWithNonce(d.safeSingleton, _safeInitializer(address(this)), uint256(0))
         );
 
         d.seatToken = address(
@@ -266,31 +241,19 @@ contract EndToEndProposalTest is Test, PENBootstrapHelper {
         pv = address(propValidation);
     }
 
-    // Extracted helper: timelock proxy deployment isolated to keep _deployInfra under
-    // the 16-slot stack limit when abi.encode has 5 arguments.
-    function _deployTimelockProxy(ProxyFactory pf, address timelockImpl, uint32 timelockDelay) private {
-        pf.deployProxy(
-            timelockImpl,
-            abi.encodeCall(
-                TimelockExecutionStrategy.setUp,
-                (abi.encode(address(this), address(0), new address[](0), uint256(timelockDelay), uint256(QUORUM)))
-            ),
-            1
-        );
-    }
-
     // Two-phase test harness that mirrors the production operator flow:
     //   Phase 1 → grant/finalize roles on SeatToken/PM/BT (matches `_finalizeAccess`).
-    //   Phase 2 → deploy Space via ProxyFactory (the in-test stand-in for snapshot.box)
-    //             using the shared `SpaceInit` builder, then call `_bootstrapPEN` to
-    //             setSpace + enableSpace + transferOwnership. No shortcuts.
+    //   Phase 2 → deploy Space via ProxyFactory (the in-test stand-in for snapshot.box),
+    //             deploy an exec strategy (Avatar or Timelock) with `spaces=[space]` and
+    //             `controller=safe`, then call `_bootstrapPEN` to setSpace + enableModule
+    //             + swapOwner. No shortcuts.
     function _deploySpaceAndFinalize(
         bool timelockEnabled,
+        uint32 timelockDelay,
         DeploymentAddresses memory d,
         address pf,
         address si,
-        address pv,
-        uint256 ssn
+        address pv
     ) private {
         // ── Phase 1 role finalize (mirrors PENDeploymentHelper._finalizeAccess) ──
         {
@@ -313,9 +276,6 @@ contract EndToEndProposalTest is Test, PENBootstrapHelper {
         {
             BondingTranche bt = BondingTranche(d.bondingTranche);
             bt.grantRole(bt.RECLAIMER_ROLE(), d.safe);
-            if (timelockEnabled) {
-                bt.grantRole(bt.RECLAIMER_ROLE(), d.timelockExecutionStrategy);
-            }
             bt.grantRole(bt.DEFAULT_ADMIN_ROLE(), d.safe);
             bt.revokeRole(bt.RECLAIMER_ROLE(), address(this));
             bt.renounceRole(bt.DEFAULT_ADMIN_ROLE(), address(this));
@@ -346,13 +306,55 @@ contract EndToEndProposalTest is Test, PENBootstrapHelper {
                 votingStrategyMetadataURI: ""
             });
             InitializeCalldata memory init = SpaceInit.buildInitializeCalldata(params);
-            ProxyFactory(pf).deployProxy(si, SpaceInit.encodeInitializeCall(init), ssn);
-            spaceAddr = _computeProxyAddress(pf, si, address(this), ssn);
+            ProxyFactory(pf).deployProxy(si, SpaceInit.encodeInitializeCall(init), 0);
+            spaceAddr = _computeProxyAddress(pf, si, address(this), 0);
         }
 
-        // ── Phase 2 finalize: setSpace + enableSpace + transferOwnership ──────
-        _bootstrapPEN(d, spaceAddr);
+        // ── Phase 2 simulacrum: deploy the exec strategy pointed at the Space ─
+        // The sx-monorepo wizard batches this with the Space create tx. We do it here in
+        // one deploy: controller = Safe (so no post-hoc transferOwnership needed), spaces =
+        // [space] (so no post-hoc enableSpace needed).
+        execStrategy = _deployExecStrategyForSpace(pf, spaceAddr, d.safe, timelockEnabled, timelockDelay);
+
+        // ── Phase 2 finalize: setSpace + Safe.enableModule + Safe.swapOwner ───
+        _bootstrapPEN(d, spaceAddr, execStrategy, address(this));
         space = spaceAddr;
+    }
+
+    // Deploys an AvatarExecutionStrategy (base test) or TimelockExecutionStrategy
+    // (TimelockedExecutionTest) via ProxyFactory, matching the wizard's Executions step.
+    function _deployExecStrategyForSpace(
+        address proxyFactory,
+        address spaceAddr,
+        address safe,
+        bool timelockEnabled,
+        uint32 timelockDelay
+    ) private returns (address deployed) {
+        address[] memory spaces = new address[](1);
+        spaces[0] = spaceAddr;
+        if (timelockEnabled) {
+            TimelockExecutionStrategy impl = new TimelockExecutionStrategy();
+            ProxyFactory(proxyFactory)
+                .deployProxy(
+                    address(impl),
+                    abi.encodeCall(
+                        TimelockExecutionStrategy.setUp,
+                        (abi.encode(safe, address(0), spaces, uint256(timelockDelay), uint256(QUORUM)))
+                    ),
+                    1
+                );
+            deployed = _computeProxyAddress(proxyFactory, address(impl), address(this), 1);
+        } else {
+            AvatarExecutionStrategy impl =
+                new AvatarExecutionStrategy(address(this), address(this), new address[](0), 1);
+            ProxyFactory(proxyFactory)
+                .deployProxy(
+                    address(impl),
+                    abi.encodeCall(AvatarExecutionStrategy.setUp, (abi.encode(safe, safe, spaces, uint256(QUORUM)))),
+                    1
+                );
+            deployed = _computeProxyAddress(proxyFactory, address(impl), address(this), 1);
+        }
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
@@ -737,12 +739,15 @@ contract EndToEndProposalTest is Test, PENBootstrapHelper {
         assertTrue(bt.hasRole(bt.RECLAIMER_ROLE(), sys.safe));
         assertFalse(bt.hasRole(bt.RECLAIMER_ROLE(), address(this)));
 
-        // Safe module
-        assertTrue(Safe(payable(sys.safe)).isModuleEnabled(sys.executionStrategy));
+        // Safe module + sole owner both point at the UI-deployed exec strategy
+        assertTrue(Safe(payable(sys.safe)).isModuleEnabled(execStrategy));
+        address[] memory safeOwners = Safe(payable(sys.safe)).getOwners();
+        assertEq(safeOwners.length, 1);
+        assertEq(safeOwners[0], execStrategy);
 
         // Execution strategy
-        assertEq(ISpaceManager(sys.executionStrategy).isSpaceEnabled(space), 1);
-        assertEq(IOwnable(sys.executionStrategy).owner(), sys.safe);
+        assertEq(ISpaceManager(execStrategy).isSpaceEnabled(space), 1);
+        assertEq(IOwnable(execStrategy).owner(), sys.safe);
 
         // Space
         assertEq(ISpaceExec(space).owner(), sys.safe);
