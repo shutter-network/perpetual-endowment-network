@@ -115,7 +115,8 @@ contract BankRunIntegrationTest is Test {
 
     function test_BankRunRevertsGracefullyWhenRefundObligationExceedsManagedAssets() public {
         MockUSDC usdc = new MockUSDC();
-        SeatToken seatToken = new SeatToken("PEN Seat", "SEAT", 3, 365 days, admin, address(0), address(0), address(0));
+        SeatToken seatToken =
+            new SeatToken("PEN Seat", "SEAT", 3, 365 days, admin, address(0), address(0), address(0), address(0));
         PrincipalManager principalManager = new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)));
 
         uint256[] memory upperBounds = new uint256[](1);
@@ -165,8 +166,9 @@ contract BankRunIntegrationTest is Test {
         )
     {
         usdc = new MockUSDC();
-        seatToken =
-            new SeatToken("PEN Seat", "SEAT", TOTAL_PURCHASES, 365 days, admin, address(0), address(0), address(0));
+        seatToken = new SeatToken(
+            "PEN Seat", "SEAT", TOTAL_PURCHASES, 365 days, admin, address(0), address(0), address(0), address(0)
+        );
         principalManager = new PrincipalManager(usdc, admin, address(0), RESERVE_TARGET, IERC4626(address(0)));
         principalVault = new ERC4626Mock(address(usdc));
 
@@ -206,8 +208,9 @@ contract BankRunIntegrationTest is Test {
         )
     {
         usdc = new MockUSDC();
-        seatToken =
-            new SeatToken("PEN Seat", "SEAT", TOTAL_PURCHASES, 365 days, admin, address(0), address(0), address(0));
+        seatToken = new SeatToken(
+            "PEN Seat", "SEAT", TOTAL_PURCHASES, 365 days, admin, address(0), address(0), address(0), address(0)
+        );
         principalManager = new PrincipalManager(usdc, admin, address(0), RESERVE_TARGET, IERC4626(address(0)));
         principalVault = new LimitedWithdrawalVault(address(usdc));
 

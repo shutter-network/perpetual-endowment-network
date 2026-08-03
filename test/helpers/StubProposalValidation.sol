@@ -20,7 +20,11 @@ import {IVotes} from "openzeppelin-contracts/contracts/governance/utils/IVotes.s
 // this conflict in practice, so the stub sidesteps the dependency entirely.
 // TODO(upstream-fix): remove stub once snapshot-labs/sx-evm fixes bare "src/" imports.
 contract StubProposalValidation {
-    function validate(address author, bytes calldata params, bytes calldata /* userParams */)
+    function validate(
+        address author,
+        bytes calldata params,
+        bytes calldata /* userParams */
+    )
         external
         view
         returns (bool)

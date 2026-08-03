@@ -26,7 +26,8 @@ contract FrontRunningIntegrationTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC();
-        seatToken = new SeatToken("PEN Seat", "SEAT", 10_000, 365 days, admin, address(0), address(0), address(0));
+        seatToken =
+            new SeatToken("PEN Seat", "SEAT", 10_000, 365 days, admin, address(0), address(0), address(0), address(0));
         principalManager = new PrincipalManager(usdc, admin, address(0), 0, IERC4626(address(0)));
 
         uint256[] memory upperBounds = new uint256[](2);

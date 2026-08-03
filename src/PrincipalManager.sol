@@ -26,6 +26,8 @@ contract PrincipalManager is IPrincipalManager, AccessControl, Pausable, Reentra
     error InvalidVaultAsset(address vault, address asset);
     error InvalidReceiver(address receiver);
     error PrincipalUnderflow(uint256 accountedPrincipal, uint256 amount);
+    error PreviousVaultNotTracked(address vault);
+    error PreviousVaultIsCurrent(address vault);
 
     IERC20 public immutable override asset;
     IERC4626 public principalVault;
@@ -42,6 +44,7 @@ contract PrincipalManager is IPrincipalManager, AccessControl, Pausable, Reentra
     event PrincipalVaultDeposit(address indexed vault, uint256 assets, uint256 shares);
     event PrincipalVaultUpdated(address indexed previousVault, address indexed newVault);
     event PrincipalVaultWithdrawal(address indexed vault, address indexed receiver, uint256 assets, uint256 shares);
+    event PreviousPrincipalVaultRemoved(address indexed vault, uint256 abandonedShares);
     event VaultWithdrawal(address indexed vault, address indexed receiver, uint256 assets, uint256 shares);
     event Withdrawn(address indexed token, address indexed receiver, uint256 amount);
 
@@ -126,6 +129,43 @@ contract PrincipalManager is IPrincipalManager, AccessControl, Pausable, Reentra
 
     function previousPrincipalVaultCount() external view returns (uint256) {
         return previousPrincipalVaults.length;
+    }
+
+    /// @notice Remove a historical vault entry from the previousPrincipalVaults array.
+    /// @dev Admin-only. Intended for vaults that have been fully drained via
+    ///      `withdrawFromVault`, or for permanently-impaired integrations whose remaining
+    ///      shares governance is choosing to write off. This function DOES NOT check the
+    ///      remaining share balance: if the contract still holds shares of `vault` at
+    ///      removal time, those shares are effectively abandoned (no longer counted in
+    ///      `totalManagedAssets`). Use with care. The abandoned share count is emitted
+    ///      in the event on a best-effort basis (a reverting balanceOf is reported as 0).
+    function removePreviousVault(IERC4626 vault) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        address vaultAddress = address(vault);
+        if (!_isPreviousPrincipalVault[vaultAddress]) revert PreviousVaultNotTracked(vaultAddress);
+        if (vaultAddress == address(principalVault)) revert PreviousVaultIsCurrent(vaultAddress);
+
+        uint256 length = previousPrincipalVaults.length;
+        for (uint256 i; i < length; ++i) {
+            if (address(previousPrincipalVaults[i]) != vaultAddress) {
+                continue;
+            }
+
+            uint256 lastIndex = length - 1;
+            if (i != lastIndex) {
+                previousPrincipalVaults[i] = previousPrincipalVaults[lastIndex];
+            }
+            previousPrincipalVaults.pop();
+            break;
+        }
+
+        delete _isPreviousPrincipalVault[vaultAddress];
+
+        uint256 abandonedShares;
+        try vault.balanceOf(address(this)) returns (uint256 shares) {
+            abandonedShares = shares;
+        } catch {}
+
+        emit PreviousPrincipalVaultRemoved(vaultAddress, abandonedShares);
     }
 
     function isPrincipalVaultSet() public view returns (bool) {
@@ -376,12 +416,19 @@ contract PrincipalManager is IPrincipalManager, AccessControl, Pausable, Reentra
                 continue; // avoid double-counting when current vault is also historical
             }
 
-            uint256 shares = vault.balanceOf(address(this));
-            if (shares == 0) {
-                continue;
-            }
-
-            assets += vault.convertToAssets(shares);
+            // Reads are wrapped in try/catch so a single reverting historical vault
+            // (self-destructed, upgraded to reverting code, gated pause, etc.) cannot
+            // brick totalManagedAssets and therefore refunds. A reverting vault is
+            // treated as contributing zero, which makes the refund solvency check
+            // strictly more conservative rather than less.
+            try vault.balanceOf(address(this)) returns (uint256 shares) {
+                if (shares == 0) {
+                    continue;
+                }
+                try vault.convertToAssets(shares) returns (uint256 vaultAssets) {
+                    assets += vaultAssets;
+                } catch {}
+            } catch {}
         }
     }
 }
