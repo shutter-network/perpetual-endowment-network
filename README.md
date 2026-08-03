@@ -168,10 +168,10 @@ Open [`https://snapshot.box/#/create/snapshot-x`](https://snapshot.box/#/create/
 
 | Step | Field | Value |
 | --- | --- | --- |
-| **Profile** | Space name | `Shutter - PEN` (or your chosen display name) |
-| | Avatar / cover | Upload images in the UI |
-| | Description | Free text |
-| | External URL / socials | Optional |
+| **Profile** | Space name | `Shutter  PEN` (or your chosen display name) |
+| | Avatar / cover | Upload image in the UI ([shutter-logo](logo/shutter-pen-logo-blue-1024.png)) |
+| | Description | A perpetual endowment network (PEN) funding projects aligned with The Ethereum Cypherpunk Manifesto |
+| | External URL / socials | Website URL: shutterpen.eth.limo |
 | | Voting power symbol | `SEAT` |
 | **Network** | Space network | `Ethereum` (mainnet), matching your RPC |
 | **Strategies** | Voting strategy | `OZ Votes` — token = `deployments/<chainId>.json → seatToken` |

@@ -17,6 +17,7 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
     error HolderStillActive(address holder);
     error InvalidAdmin(address admin);
     error InvalidAmount();
+    error InvalidBatchInput();
     error InvalidRecipient(address recipient);
     error InvalidRefundReceiver(address receiver);
     error InvalidTrancheConfiguration();
@@ -37,6 +38,14 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
 
     event SeatsPurchased(
         address indexed payer, address indexed recipient, uint256 seats, uint256 totalCost, uint256 newTotalSupply
+    );
+    event SeatsBatchPurchased(
+        address indexed payer,
+        address[] recipients,
+        uint256[] amounts,
+        uint256 totalSeats,
+        uint256 totalCost,
+        uint256 newTotalSupply
     );
     event SeatsRefunded(
         address indexed holder, address indexed receiver, uint256 seats, uint256 refundAmount, uint256 newTotalSupply
@@ -191,6 +200,55 @@ contract BondingTranche is AccessControl, ReentrancyGuard {
         seatToken.mint(recipient, amount);
 
         emit SeatsPurchased(msg.sender, recipient, amount, totalCost, IERC20(address(seatToken)).totalSupply());
+    }
+
+    /// @notice Purchase seats for many recipients in a single transaction.
+    /// @dev Pricing is a pure function of the supply range `[totalSupply, totalSupply + totalSeats)`,
+    ///      so the aggregate cost is independent of how `totalSeats` is split across recipients or of
+    ///      their order: the whole batch is quoted once via `quotePurchase(totalSeats)`. `maxCost` is a
+    ///      slippage bound on that single aggregate cost.
+    ///
+    ///      Reentrancy: guarded by `nonReentrant`, and funds are moved to the `PrincipalManager` and
+    ///      accounted (`recordPurchase`) BEFORE any seat is minted — so even if a hook could re-enter,
+    ///      supply/price state is already settled. `asset` and `seatToken` are immutable, trusted
+    ///      contracts fixed at construction; neither mint nor the ERC20 transfer hands control to an
+    ///      arbitrary `recipients[i]`.
+    ///
+    ///      Unlike the per-entry "skip bad rows" pattern used by the activity-refresh batches, every
+    ///      entry here is validated and a single bad entry reverts the whole batch: a purchase moves the
+    ///      caller's funds, so partial execution with a silently-dropped recipient would be a footgun.
+    ///      Duplicate recipients are allowed (their mints simply accumulate).
+    function multiPurchase(address[] calldata recipients, uint256[] calldata amounts, uint256 maxCost)
+        external
+        nonReentrant
+        returns (uint256 totalCost)
+    {
+        if (principalManager.paused()) revert PrincipalManagerPaused();
+
+        uint256 length = recipients.length;
+        if (length == 0 || length != amounts.length) revert InvalidBatchInput();
+
+        uint256 totalSeats;
+        for (uint256 i; i < length; ++i) {
+            if (recipients[i] == address(0)) revert InvalidRecipient(recipients[i]);
+            if (amounts[i] == 0) revert InvalidAmount();
+            totalSeats += amounts[i];
+        }
+
+        totalCost = quotePurchase(totalSeats);
+        if (totalCost > maxCost) revert PurchaseCostExceedsLimit(totalCost, maxCost);
+
+        // Effects/interactions on the money side first: settle funds and accounting before minting.
+        asset.safeTransferFrom(msg.sender, address(principalManager), totalCost);
+        principalManager.recordPurchase(totalCost);
+
+        for (uint256 i; i < length; ++i) {
+            seatToken.mint(recipients[i], amounts[i]);
+        }
+
+        emit SeatsBatchPurchased(
+            msg.sender, recipients, amounts, totalSeats, totalCost, IERC20(address(seatToken)).totalSupply()
+        );
     }
 
     function refund(uint256 amount, address receiver) external nonReentrant returns (uint256 refundAmount) {
