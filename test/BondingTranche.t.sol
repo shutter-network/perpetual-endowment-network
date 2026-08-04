@@ -141,6 +141,150 @@ contract BondingTrancheTest is Test {
         bondingTranche.purchase(alice, 4, 4e6);
     }
 
+    function test_MultiPurchaseMintsToEachRecipientAndRoutesAggregateCost() public {
+        // totalSeats = 5 spanning tranche 0 (3 @ 1e6) and tranche 1 (2 @ 2e6) => 7e6.
+        usdc.mint(alice, 10e6);
+        vm.prank(alice);
+        usdc.approve(address(bondingTranche), 10e6);
+
+        address[] memory recipients = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        recipients[0] = alice;
+        recipients[1] = bob;
+        amounts[0] = 3;
+        amounts[1] = 2;
+
+        vm.prank(alice);
+        uint256 totalCost = bondingTranche.multiPurchase(recipients, amounts, 7e6);
+
+        assertEq(totalCost, 7e6);
+        assertEq(seatToken.balanceOf(alice), 3);
+        assertEq(seatToken.balanceOf(bob), 2);
+        assertEq(seatToken.getVotes(alice), 3);
+        assertEq(seatToken.getVotes(bob), 2);
+        assertEq(principalManager.accountedPrincipal(), 7e6);
+        assertEq(usdc.balanceOf(address(principalManager)), 7e6);
+        assertEq(usdc.balanceOf(alice), 3e6);
+    }
+
+    function test_MultiPurchaseCostEqualsSequentialPurchaseCost() public {
+        // Splitting a batch across recipients costs exactly quotePurchase(sum), independent of order.
+        assertEq(bondingTranche.quotePurchase(5), 7e6);
+
+        address[] memory recipients = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        recipients[0] = alice;
+        recipients[1] = bob;
+        amounts[0] = 3;
+        amounts[1] = 2;
+
+        usdc.mint(alice, 10e6);
+        vm.prank(alice);
+        usdc.approve(address(bondingTranche), 10e6);
+        vm.prank(alice);
+        uint256 batchCost = bondingTranche.multiPurchase(recipients, amounts, 7e6);
+
+        assertEq(batchCost, 7e6);
+    }
+
+    function test_MultiPurchaseRevertsWhenAggregateCostExceedsLimit() public {
+        usdc.mint(alice, 10e6);
+        vm.prank(alice);
+        usdc.approve(address(bondingTranche), 10e6);
+
+        address[] memory recipients = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        recipients[0] = alice;
+        recipients[1] = bob;
+        amounts[0] = 3;
+        amounts[1] = 2;
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(BondingTranche.PurchaseCostExceedsLimit.selector, 7e6, 6e6));
+        bondingTranche.multiPurchase(recipients, amounts, 6e6);
+    }
+
+    function test_MultiPurchaseRevertsOnLengthMismatch() public {
+        address[] memory recipients = new address[](2);
+        uint256[] memory amounts = new uint256[](1);
+        recipients[0] = alice;
+        recipients[1] = bob;
+        amounts[0] = 1;
+
+        vm.prank(alice);
+        vm.expectRevert(BondingTranche.InvalidBatchInput.selector);
+        bondingTranche.multiPurchase(recipients, amounts, 100e6);
+    }
+
+    function test_MultiPurchaseRevertsOnEmptyInput() public {
+        address[] memory recipients = new address[](0);
+        uint256[] memory amounts = new uint256[](0);
+
+        vm.prank(alice);
+        vm.expectRevert(BondingTranche.InvalidBatchInput.selector);
+        bondingTranche.multiPurchase(recipients, amounts, 100e6);
+    }
+
+    function test_MultiPurchaseRevertsOnZeroRecipient() public {
+        address[] memory recipients = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        recipients[0] = alice;
+        recipients[1] = address(0);
+        amounts[0] = 1;
+        amounts[1] = 1;
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(BondingTranche.InvalidRecipient.selector, address(0)));
+        bondingTranche.multiPurchase(recipients, amounts, 100e6);
+    }
+
+    function test_MultiPurchaseRevertsOnZeroAmount() public {
+        address[] memory recipients = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        recipients[0] = alice;
+        recipients[1] = bob;
+        amounts[0] = 1;
+        amounts[1] = 0;
+
+        vm.prank(alice);
+        vm.expectRevert(BondingTranche.InvalidAmount.selector);
+        bondingTranche.multiPurchase(recipients, amounts, 100e6);
+    }
+
+    function test_MultiPurchaseRevertsWhilePrincipalManagerPaused() public {
+        vm.prank(admin);
+        principalManager.pause();
+
+        address[] memory recipients = new address[](1);
+        uint256[] memory amounts = new uint256[](1);
+        recipients[0] = alice;
+        amounts[0] = 1;
+
+        vm.prank(alice);
+        vm.expectRevert(BondingTranche.PrincipalManagerPaused.selector);
+        bondingTranche.multiPurchase(recipients, amounts, 100e6);
+    }
+
+    function test_MultiPurchaseRevertsWhenExceedingSaleCap() public {
+        // Final tranche upper bound is 10 seats; requesting 11 must revert (no seats minted).
+        usdc.mint(alice, 100e6);
+        vm.prank(alice);
+        usdc.approve(address(bondingTranche), 100e6);
+
+        address[] memory recipients = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        recipients[0] = alice;
+        recipients[1] = bob;
+        amounts[0] = 6;
+        amounts[1] = 5;
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(BondingTranche.InsufficientSeatsAvailable.selector, 11, 10));
+        bondingTranche.multiPurchase(recipients, amounts, 100e6);
+
+        assertEq(seatToken.totalSupply(), 0);
+    }
+
     function test_ExtendTranchesReopensSalesBeyondInitialCap() public {
         MockUSDC usdc2 = new MockUSDC();
         address admin2 = makeAddr("admin2");

@@ -120,7 +120,7 @@ The scripts involved:
 - [`script/PreviewPENSystem.s.sol`](script/PreviewPENSystem.s.sol) — Phase 1 dry-run. Predicts the full address plan from the deployer, its current nonce, and `DEPLOYMENT_SALT` without broadcasting.
 - [`script/DeployPENSystem.s.sol`](script/DeployPENSystem.s.sol) — Phase 1 broadcast. Writes `deployments/<chainId>.json` marked `phase2Pending: true`.
 - [`script/PreviewSpaceBinding.s.sol`](script/PreviewSpaceBinding.s.sol) — Phase 2 pre-flight. Reads the candidate Space (via `PHASE2_SPACE_ADDRESS`) and prints owner, authenticators, voting strategies, proposal validation strategy, and voting-window params for human eyeballing.
-- [`script/BootstrapPEN.s.sol`](script/BootstrapPEN.s.sol) — Phase 2 broadcast. Runs `SeatToken.setSpace`, submits a Safe transaction to `enableModule(execStrategy)`, then a second Safe transaction to `swapOwner(SENTINEL, deployer, execStrategy)`. Rewrites the artifact with the resolved `space` and `execStrategy` addresses and drops the `phase2Pending` flag.
+- [`script/BootstrapPEN.s.sol`](script/BootstrapPEN.s.sol) — Phase 2 broadcast. First runs an on-chain **governance-wiring preflight** that cross-checks the operator-supplied Space + exec strategy against the `.env` governance config (authenticator, voting strategy over the deployed `SeatToken`, proposal-validation strategy + threshold, voting-window params, exec-strategy quorum / timelock delay / veto guardian) and the structural link (the exec strategy has this Space enabled and is owned by / targets the Safe). A mismatch reverts during simulation, so **nothing is broadcast** and the irreversible `swapOwner` never fires against a mis-pasted or mis-configured address. On success it runs `SeatToken.setSpace`, submits a Safe transaction to `enableModule(execStrategy)`, then a second Safe transaction to `swapOwner(SENTINEL, deployer, execStrategy)`. Rewrites the artifact with the resolved `space` and `execStrategy` addresses and drops the `phase2Pending` flag.
 
 #### Step 1 — Load the environment
 
@@ -168,10 +168,10 @@ Open [`https://snapshot.box/#/create/snapshot-x`](https://snapshot.box/#/create/
 
 | Step | Field | Value |
 | --- | --- | --- |
-| **Profile** | Space name | `Shutter - PEN` (or your chosen display name) |
-| | Avatar / cover | Upload images in the UI |
-| | Description | Free text |
-| | External URL / socials | Optional |
+| **Profile** | Space name | `Shutter  PEN` (or your chosen display name) |
+| | Avatar / cover | Upload image in the UI ([shutter-logo](logo/shutter-pen-logo-blue-1024.png)) |
+| | Description | A perpetual endowment network (PEN) funding projects aligned with The Ethereum Cypherpunk Manifesto |
+| | External URL / socials | Website URL: shutterpen.eth.limo |
 | | Voting power symbol | `SEAT` |
 | **Network** | Space network | `Ethereum` (mainnet), matching your RPC |
 | **Strategies** | Voting strategy | `OZ Votes` — token = `deployments/<chainId>.json → seatToken` |
@@ -183,9 +183,9 @@ Open [`https://snapshot.box/#/create/snapshot-x`](https://snapshot.box/#/create/
 | | Veto guardian address *(Timelock only)* | Leave blank (defaults to `0x0000…0000`) |
 | | Timelock delay *(Timelock only)* | `1 day` (`TIMELOCK_DELAY = 86400`) |
 | **Auths** | Authenticator | `EthTx` only (stock `EthTxAuthenticator`) |
-| **Voting** | Voting delay | `1 day` (`VOTING_DELAY = 86400`) |
-| | Min voting duration | `3 days` (`MIN_VOTING_DURATION = 259200`) |
-| | Max voting duration | `3 days` (`MAX_VOTING_DURATION = 259200`) |
+| **Voting** | Voting delay | `1 day` (enter as a duration in the UI; stored on-chain as **7200 blocks** — `VOTING_DELAY = 7200`) |
+| | Min voting duration | `3 days` (stored as **21600 blocks** — `MIN_VOTING_DURATION = 21600`) |
+| | Max voting duration | `3 days` (stored as **21600 blocks** — `MAX_VOTING_DURATION = 21600`) |
 | **Controller** | Controller | `deployments/<chainId>.json → safe` |
 
 Reference addresses (mainnet, from `.env.example`; verify against `lib/sx-evm/deployments/1.json` before use):
@@ -269,7 +269,9 @@ forge script script/BootstrapPEN.s.sol:BootstrapPEN \
   --broadcast
 ```
 
-This broadcasts, in order, from the same deployer EOA that ran Phase 1:
+Before broadcasting anything, the script runs a **governance-wiring preflight** (`_assertGovernanceConfig`) that cross-checks the Space and exec strategy against the `.env` governance config and asserts the exec strategy is linked to this Space and controls the Safe. Because `forge script` simulates the whole run before sending any transaction, any mismatch reverts here and **no transaction is broadcast** — the irreversible owner swap in step 3 below cannot fire against a wrong address. This is the on-chain backstop for the same values `PreviewSpaceBinding` (Step 7) prints for human review.
+
+On success it broadcasts, in order, from the same deployer EOA that ran Phase 1:
 
 1. `SeatToken.setSpace(space)` — reverts if `space` is not a contract or its `owner()` doesn't match the Safe address baked into `SeatToken` at Phase 1; on success flips `spaceLocked = true` and clears the `bootstrap` slot to `address(0)` permanently.
 2. Safe transaction `Safe.execTransaction(enableModule(execStrategy), …)`. The deployer, still the Safe's sole owner and threshold=1, signs via the `v=1` "msg.sender == approver" shortcut — no separate `approveHash` call needed.
@@ -279,13 +281,21 @@ On success the artifact at `deployments/<chainId>.json` is rewritten with the re
 
 #### Step 9 — (Optional) State verifier
 
-Run [`script/VerifyPENSystem.s.sol`](script/VerifyPENSystem.s.sol) against the RPC to cross-check the deployed contracts and the UI-created Space against the config values in `.env`:
+Run [`script/VerifyPENSystem.s.sol`](script/VerifyPENSystem.s.sol) against the RPC to cross-check the contract addresses in the deployment manifest against the Shutter PEN config values in `.env` and live on-chain state:
 
 ```sh
-forge script script/VerifyPENSystem.s.sol:VerifyPENSystem --rpc-url "$RPC_URL"
+DEPLOYMENT_FILE=deployments/<chainId>.json \
+  forge script script/VerifyPENSystem.s.sol:VerifyPENSystem --rpc-url "$RPC_URL"
 ```
 
-This checks role holders, exec-strategy ownership and space enablement, Space authenticators / voting strategies / proposal validation strategy, and voting-window params against the intended values. For membership-completeness checks that also need historical logs (no stray role holders, no extra enabled spaces, seat-holder census), use the [`script/verify-pen.sh`](script/verify-pen.sh) wrapper.
+`DEPLOYMENT_FILE` is optional and defaults to `deployments/<connected-chain-id>.json`. The verifier consumes the addresses directly, so it does not need the original deployer, deployment salt, or historical deployer nonce. It checks bytecode presence, role holders, core-contract wiring and parameters, permanent SeatToken-to-Space binding, exec-strategy ownership and space enablement, Safe singleton / owner / module settings, Space authenticators / voting strategies / proposal validation strategy, voting-window parameters, and treasury solvency. It intentionally does not require optional version-specific functions such as `BondingTranche.multiPurchase`, allowing older deployments to be verified against the same setup plan.
+
+For membership-completeness checks that also need historical logs (no stray role holders, no event-visible post-deployment Space additions, seat-holder census), use the [`script/verify-pen.sh`](script/verify-pen.sh) wrapper:
+
+```sh
+DEPLOYMENT_FILE=deployments/<chainId>.json FROM_BLOCK=<deploymentBlock> \
+  ./script/verify-pen.sh .env
+```
 
 ### Publishing the Deployment
 
